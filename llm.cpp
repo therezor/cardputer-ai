@@ -16,7 +16,9 @@
 //  Constants — file format
 // ============================================================================
 static const uint8_t  MAGIC[4]      = { 'C', 'R', 'D', 'P' };
-static const uint32_t VERSION       = 1;
+static const uint32_t VERSION_LLAMA  = 1;   // TinyLLama-v0 (RMSNorm/RoPE/SwiGLU)
+static const uint32_t VERSION_GPTNEO = 2;   // TinyStories-Instruct (LN/wpe/GELU)
+static const uint32_t TOK_MAGIC      = 0x324B5443; // "CTK2"
 static const int      BLOCK_SIZE    = 32;   // weights per Q4_0 block
 static const size_t   BYTES_PER_BLK = 18;   // 2B bf16 scale + 16B nibbles
 
@@ -160,6 +162,22 @@ static void rmsnorm(float* o, const float* x, const float* w, int size) {
   for (int i = 0; i < size; i++) o[i] = w[i] * (ss * x[i]);
 }
 
+static void layernorm(float* o, const float* x, const float* g, const float* b, int size) {
+  float mean = 0.0f;
+  for (int i = 0; i < size; i++) mean += x[i];
+  mean /= size;
+  float var = 0.0f;
+  for (int i = 0; i < size; i++) { float d = x[i] - mean; var += d * d; }
+  var /= size;
+  float inv = 1.0f / sqrtf(var + 1e-5f);
+  for (int i = 0; i < size; i++) o[i] = g[i] * ((x[i] - mean) * inv) + b[i];
+}
+
+// GPT-Neo / GPT-2 "gelu_new" (tanh approximation).
+static inline float gelu_new(float x) {
+  return 0.5f * x * (1.0f + tanhf(0.7978845608f * (x + 0.044715f * x * x * x)));
+}
+
 static void softmax(float* x, int size) {
   float mx = x[0];
   for (int i = 1; i < size; i++) if (x[i] > mx) mx = x[i];
@@ -169,9 +187,9 @@ static void softmax(float* x, int size) {
 }
 
 // ============================================================================
-//  Forward pass
+//  Forward pass — LLaMA (RMSNorm, RoPE, SwiGLU)
 // ============================================================================
-float* llm_forward(Transformer* T, int token, int pos) {
+static float* forward_llama(Transformer* T, int token, int pos) {
   Config* p = &T->config;
   RunState* s = &T->state;
   int dim        = p->dim;
@@ -275,6 +293,114 @@ float* llm_forward(Transformer* T, int token, int pos) {
 }
 
 // ============================================================================
+//  Forward pass — GPT-Neo (LayerNorm, learned positions, GELU)
+//
+//  Faithful to HF GPTNeoForCausalLM with two simplifications that are exact
+//  at our context size: the alternating local-attention layers have a window
+//  of 256 >= kv_seq_len, so they degenerate to global causal attention; and
+//  GPT-Neo famously does NOT scale attention scores by 1/sqrt(head_size).
+// ============================================================================
+static float* forward_gptneo(Transformer* T, int token, int pos) {
+  Config* p = &T->config;
+  RunState* s = &T->state;
+  int dim        = p->dim;
+  int kv_dim     = dim;                 // n_kv_heads == n_heads
+  int hidden_dim = p->hidden_dim;
+  int head_size  = dim / p->n_heads;
+  int kvL        = T->kv_seq_len;
+  if (pos >= kvL) pos = kvL - 1;
+
+  // ---- token embedding + position embedding ----
+  {
+    size_t row_bytes = ((size_t)(dim / BLOCK_SIZE)) * BYTES_PER_BLK;
+    dequant_q4_row(s->x, T->token_embed_q4 + (size_t)token * row_bytes, dim);
+    const float* pe = T->wpe + (size_t)pos * dim;
+    for (int i = 0; i < dim; i++) s->x[i] += pe[i];
+  }
+
+  for (int l = 0; l < p->n_layers; l++) {
+    layernorm(s->xb, s->x, T->rms_att + (size_t)l * dim, T->ln_att_b + (size_t)l * dim, dim);
+
+    matmul_q4(s->q, s->xb, T->wq_q4 + (size_t)l * T->stride_wq, dim, dim);
+    matmul_q4(s->k, s->xb, T->wk_q4 + (size_t)l * T->stride_wk, dim, dim);
+    matmul_q4(s->v, s->xb, T->wv_q4 + (size_t)l * T->stride_wv, dim, dim);
+
+    // Quantize this position's k/v rows to int8 with one fp32 scale per row.
+    {
+      int8_t* krow = s->key_cache8   + (size_t)l * kvL * kv_dim + (size_t)pos * kv_dim;
+      int8_t* vrow = s->value_cache8 + (size_t)l * kvL * kv_dim + (size_t)pos * kv_dim;
+      float kmax = 0, vmax = 0;
+      for (int i = 0; i < kv_dim; i++) {
+        float ka = fabsf(s->k[i]); if (ka > kmax) kmax = ka;
+        float va = fabsf(s->v[i]); if (va > vmax) vmax = va;
+      }
+      float ks = kmax / 127.0f, vs = vmax / 127.0f;
+      float kinv = ks > 0 ? 1.0f / ks : 0, vinv = vs > 0 ? 1.0f / vs : 0;
+      s->k_scales[l * kvL + pos] = ks;
+      s->v_scales[l * kvL + pos] = vs;
+      for (int i = 0; i < kv_dim; i++) {
+        krow[i] = (int8_t)lrintf(s->k[i] * kinv);
+        vrow[i] = (int8_t)lrintf(s->v[i] * vinv);
+      }
+    }
+
+    for (int h = 0; h < p->n_heads; h++) {
+      float* q   = s->q   + h * head_size;
+      float* att = s->att + h * kvL;
+      for (int t = 0; t <= pos; t++) {
+        const int8_t* k = s->key_cache8 + (size_t)l * kvL * kv_dim
+                                        + (size_t)t * kv_dim + h * head_size;
+        float score = 0;
+        for (int i = 0; i < head_size; i++) score += q[i] * (float)k[i];
+        att[t] = score * s->k_scales[l * kvL + t];  // note: no 1/sqrt(head_size)
+      }
+      softmax(att, pos + 1);
+      float* xb = s->xb + h * head_size;
+      memset(xb, 0, head_size * sizeof(float));
+      for (int t = 0; t <= pos; t++) {
+        const int8_t* v = s->value_cache8 + (size_t)l * kvL * kv_dim
+                                          + (size_t)t * kv_dim + h * head_size;
+        float a = att[t] * s->v_scales[l * kvL + t];
+        for (int i = 0; i < head_size; i++) xb[i] += a * (float)v[i];
+      }
+    }
+
+    matmul_q4(s->xb2, s->xb, T->wo_q4 + (size_t)l * T->stride_wo, dim, dim);
+    {
+      const float* bo = T->bo + (size_t)l * dim;
+      for (int i = 0; i < dim; i++) s->x[i] += s->xb2[i] + bo[i];
+    }
+
+    layernorm(s->xb, s->x, T->rms_ffn + (size_t)l * dim, T->ln_ffn_b + (size_t)l * dim, dim);
+
+    matmul_q4(s->hb, s->xb, T->w1_q4 + (size_t)l * T->stride_w1w3, dim, hidden_dim);
+    {
+      const float* bf = T->b_fc + (size_t)l * hidden_dim;
+      for (int i = 0; i < hidden_dim; i++) s->hb[i] = gelu_new(s->hb[i] + bf[i]);
+    }
+
+    matmul_q4(s->xb, s->hb, T->w2_q4 + (size_t)l * T->stride_w2, hidden_dim, dim);
+    {
+      const float* bp = T->b_proj + (size_t)l * dim;
+      for (int i = 0; i < dim; i++) s->x[i] += s->xb[i] + bp[i];
+    }
+  }
+
+  layernorm(s->x, s->x, T->rms_final, T->ln_final_b, dim);
+
+  // ---- classifier: tied to the (pruned) token embedding ----
+  matmul_q4(s->logits, s->x, T->wcls_q4, dim, p->vocab_size);
+
+  yield();
+  return s->logits;
+}
+
+float* llm_forward(Transformer* T, int token, int pos) {
+  return (T->config.arch == ARCH_GPTNEO) ? forward_gptneo(T, token, pos)
+                                         : forward_llama(T, token, pos);
+}
+
+// ============================================================================
 //  Header parse + offset compute
 // ============================================================================
 bool llm_init_embedded(Transformer* T, const uint8_t* model_bytes, size_t model_size,
@@ -284,7 +410,7 @@ bool llm_init_embedded(Transformer* T, const uint8_t* model_bytes, size_t model_
 
   uint32_t version;
   memcpy(&version, model_bytes + 4, 4);
-  if (version != VERSION) return false;
+  if (version != VERSION_LLAMA && version != VERSION_GPTNEO) return false;
 
   int hdr[7];
   memcpy(hdr, model_bytes + 8, sizeof(hdr));
@@ -299,7 +425,9 @@ bool llm_init_embedded(Transformer* T, const uint8_t* model_bytes, size_t model_
   uint8_t quant  = model_bytes[37];
   T->config.shared_classifier = shared;
   T->config.quant_type        = quant;
+  T->config.arch = (version == VERSION_GPTNEO) ? model_bytes[38] : ARCH_LLAMA;
   if (quant != 4) return false;
+  if (T->config.arch != ARCH_LLAMA && T->config.arch != ARCH_GPTNEO) return false;
 
   Config* p = &T->config;
   int head_size = p->dim / p->n_heads;
@@ -308,25 +436,10 @@ bool llm_init_embedded(Transformer* T, const uint8_t* model_bytes, size_t model_
   T->kv_seq_len = (kv_seq_len > 0 && kv_seq_len < p->seq_len) ? kv_seq_len : p->seq_len;
   T->base = model_bytes;
 
-  // Layout after the 64-byte header:
-  //   fp32 rms_att [L*dim]
-  //   fp32 rms_ffn [L*dim]
-  //   fp32 rms_final [dim]
-  //   Q4_0 token_embed [V*dim]
-  //   Q4_0 wq, wk, wv, wo  (per-layer)
-  //   Q4_0 w1, w2, w3      (per-layer)
-  //   Q4_0 wcls            (or aliased to token_embed if shared)
-  size_t off = 64;
-  T->rms_att   = (const float*)(model_bytes + off); off += (size_t)p->n_layers * p->dim * sizeof(float);
-  T->rms_ffn   = (const float*)(model_bytes + off); off += (size_t)p->n_layers * p->dim * sizeof(float);
-  T->rms_final = (const float*)(model_bytes + off); off += (size_t)p->dim * sizeof(float);
-
   auto q4_bytes = [](size_t n_weights) -> size_t {
     return (n_weights / BLOCK_SIZE) * BYTES_PER_BLK;
   };
-
-  T->token_embed_q4 = model_bytes + off;
-  off += q4_bytes((size_t)p->vocab_size * p->dim);
+  size_t off = 64;
 
   T->stride_wq    = q4_bytes((size_t)(p->n_heads    * head_size) * p->dim);
   T->stride_wk    = q4_bytes((size_t)kv_dim * p->dim);
@@ -335,18 +448,64 @@ bool llm_init_embedded(Transformer* T, const uint8_t* model_bytes, size_t model_
   T->stride_w1w3  = q4_bytes((size_t)p->hidden_dim * p->dim);
   T->stride_w2    = q4_bytes((size_t)p->dim * p->hidden_dim);
 
-  T->wq_q4 = model_bytes + off; off += T->stride_wq * p->n_layers;
-  T->wk_q4 = model_bytes + off; off += T->stride_wk * p->n_layers;
-  T->wv_q4 = model_bytes + off; off += T->stride_wv * p->n_layers;
-  T->wo_q4 = model_bytes + off; off += T->stride_wo * p->n_layers;
-  T->w1_q4 = model_bytes + off; off += T->stride_w1w3 * p->n_layers;
-  T->w2_q4 = model_bytes + off; off += T->stride_w2 * p->n_layers;
-  T->w3_q4 = model_bytes + off; off += T->stride_w1w3 * p->n_layers;
-  if (shared) {
+  if (p->arch == ARCH_GPTNEO) {
+    // v2 layout after the 64-byte header (matches convert_tinystories_instruct.py):
+    //   fp32 ln1_g, ln1_b [L*dim]; ln2_g, ln2_b [L*dim]; lnf_g, lnf_b [dim]
+    //   fp32 out_proj bias [L*dim]; c_fc bias [L*hidden]; c_proj bias [L*dim]
+    //   fp32 wpe [seq_len*dim]
+    //   Q4_0 wte [V*dim] (tied classifier)
+    //   Q4_0 wq, wk, wv, wo, w_fc, w_proj  (per-layer)
+    size_t Ld = (size_t)p->n_layers * p->dim;
+    T->rms_att    = (const float*)(model_bytes + off); off += Ld * sizeof(float);
+    T->ln_att_b   = (const float*)(model_bytes + off); off += Ld * sizeof(float);
+    T->rms_ffn    = (const float*)(model_bytes + off); off += Ld * sizeof(float);
+    T->ln_ffn_b   = (const float*)(model_bytes + off); off += Ld * sizeof(float);
+    T->rms_final  = (const float*)(model_bytes + off); off += (size_t)p->dim * sizeof(float);
+    T->ln_final_b = (const float*)(model_bytes + off); off += (size_t)p->dim * sizeof(float);
+    T->bo         = (const float*)(model_bytes + off); off += Ld * sizeof(float);
+    T->b_fc       = (const float*)(model_bytes + off); off += (size_t)p->n_layers * p->hidden_dim * sizeof(float);
+    T->b_proj     = (const float*)(model_bytes + off); off += Ld * sizeof(float);
+    T->wpe        = (const float*)(model_bytes + off); off += (size_t)p->seq_len * p->dim * sizeof(float);
+
+    T->token_embed_q4 = model_bytes + off;
+    off += q4_bytes((size_t)p->vocab_size * p->dim);
+    T->wq_q4 = model_bytes + off; off += T->stride_wq * p->n_layers;
+    T->wk_q4 = model_bytes + off; off += T->stride_wk * p->n_layers;
+    T->wv_q4 = model_bytes + off; off += T->stride_wv * p->n_layers;
+    T->wo_q4 = model_bytes + off; off += T->stride_wo * p->n_layers;
+    T->w1_q4 = model_bytes + off; off += T->stride_w1w3 * p->n_layers;
+    T->w2_q4 = model_bytes + off; off += T->stride_w2 * p->n_layers;
+    T->w3_q4   = NULL;
     T->wcls_q4 = T->token_embed_q4;
   } else {
-    T->wcls_q4 = model_bytes + off;
+    // v1 layout after the 64-byte header:
+    //   fp32 rms_att [L*dim]
+    //   fp32 rms_ffn [L*dim]
+    //   fp32 rms_final [dim]
+    //   Q4_0 token_embed [V*dim]
+    //   Q4_0 wq, wk, wv, wo  (per-layer)
+    //   Q4_0 w1, w2, w3      (per-layer)
+    //   Q4_0 wcls            (or aliased to token_embed if shared)
+    T->rms_att   = (const float*)(model_bytes + off); off += (size_t)p->n_layers * p->dim * sizeof(float);
+    T->rms_ffn   = (const float*)(model_bytes + off); off += (size_t)p->n_layers * p->dim * sizeof(float);
+    T->rms_final = (const float*)(model_bytes + off); off += (size_t)p->dim * sizeof(float);
+
+    T->token_embed_q4 = model_bytes + off;
     off += q4_bytes((size_t)p->vocab_size * p->dim);
+
+    T->wq_q4 = model_bytes + off; off += T->stride_wq * p->n_layers;
+    T->wk_q4 = model_bytes + off; off += T->stride_wk * p->n_layers;
+    T->wv_q4 = model_bytes + off; off += T->stride_wv * p->n_layers;
+    T->wo_q4 = model_bytes + off; off += T->stride_wo * p->n_layers;
+    T->w1_q4 = model_bytes + off; off += T->stride_w1w3 * p->n_layers;
+    T->w2_q4 = model_bytes + off; off += T->stride_w2 * p->n_layers;
+    T->w3_q4 = model_bytes + off; off += T->stride_w1w3 * p->n_layers;
+    if (shared) {
+      T->wcls_q4 = T->token_embed_q4;
+    } else {
+      T->wcls_q4 = model_bytes + off;
+      off += q4_bytes((size_t)p->vocab_size * p->dim);
+    }
   }
   if (off > model_size) return false;
 
@@ -362,8 +521,24 @@ bool llm_init_embedded(Transformer* T, const uint8_t* model_bytes, size_t model_
   s->v      = (float*) ram_alloc(kv_dim * sizeof(float));
   s->att    = (float*) ram_alloc(p->n_heads * T->kv_seq_len * sizeof(float));
   s->logits = (float*) ram_alloc(p->vocab_size * sizeof(float));
+
+  if (p->arch == ARCH_GPTNEO) {
+    size_t cache_n  = (size_t)p->n_layers * T->kv_seq_len * kv_dim;
+    size_t scales_n = (size_t)p->n_layers * T->kv_seq_len;
+    s->key_cache8   = (int8_t*) ram_alloc(cache_n);
+    s->value_cache8 = (int8_t*) ram_alloc(cache_n);
+    s->k_scales     = (float*)  ram_alloc(scales_n * sizeof(float));
+    s->v_scales     = (float*)  ram_alloc(scales_n * sizeof(float));
+    s->key_cache = s->value_cache = NULL;
+    return s->x && s->xb && s->xb2 && s->hb && s->hb2 && s->q && s->k && s->v
+        && s->att && s->logits && s->key_cache8 && s->value_cache8
+        && s->k_scales && s->v_scales;
+  }
+
   s->key_cache   = (uint16_t*) ram_alloc((size_t)p->n_layers * T->kv_seq_len * kv_dim * sizeof(uint16_t));
   s->value_cache = (uint16_t*) ram_alloc((size_t)p->n_layers * T->kv_seq_len * kv_dim * sizeof(uint16_t));
+  s->key_cache8 = s->value_cache8 = NULL;
+  s->k_scales = s->v_scales = NULL;
 
   return s->x && s->xb && s->xb2 && s->hb && s->hb2 && s->q && s->k && s->v
       && s->att && s->logits && s->key_cache && s->value_cache;
@@ -387,14 +562,93 @@ bool llm_tokenizer_from_memory(Tokenizer* tk, const uint8_t* data, size_t size,
   tk->base       = data;
   tk->size       = size;
   tk->vocab_size = vocab_size;
-  uint32_t mtl; memcpy(&mtl, data, 4);
-  tk->max_token_length = (int)mtl;
+
+  uint32_t first; memcpy(&first, data, 4);
+  if (first == TOK_MAGIC) {
+    // CTK2 (GPT-2 byte-level BPE). vocab_size comes from the blob itself.
+    if (size < 20 + 512) return false;
+    int32_t v, mtl, eos, nm;
+    memcpy(&v,   data + 4,  4);
+    memcpy(&mtl, data + 8,  4);
+    memcpy(&eos, data + 12, 4);
+    memcpy(&nm,  data + 16, 4);
+    tk->style            = ARCH_GPTNEO;
+    tk->vocab_size       = v;
+    tk->max_token_length = mtl;
+    tk->eos_id           = eos;
+    tk->n_merges         = nm;
+    tk->byte_ids         = (const uint16_t*)(data + 20);
+    tk->merges           = (const uint16_t*)(data + 20 + 512);
+    tk->pieces           = data + 20 + 512 + (size_t)nm * 6;
+    if (tk->pieces > data + size) return false;
+  } else {
+    tk->style            = ARCH_LLAMA;
+    tk->max_token_length = (int)first;
+    tk->eos_id           = 2;
+    tk->n_merges         = 0;
+    tk->byte_ids         = NULL;
+    tk->merges           = NULL;
+    tk->pieces           = NULL;
+  }
 
   for (int i = 0; i < 256; i++) {
     tk->byte_pieces[i*2]   = (unsigned char)i;
     tk->byte_pieces[i*2+1] = 0;
   }
   return true;
+}
+
+// ---- CTK2 helpers -----------------------------------------------------------
+
+// Binary search the (a,b,c) merge table (sorted by a, then b). Returns merged
+// id c, or -1 if the pair has no merge.
+static int ctk2_find_merge(const Tokenizer* tk, int a, int b) {
+  int lo = 0, hi = tk->n_merges - 1;
+  while (lo <= hi) {
+    int mid = (lo + hi) >> 1;
+    const uint16_t* m = tk->merges + mid * 3;
+    if (m[0] < a || (m[0] == a && m[1] < b))      lo = mid + 1;
+    else if (m[0] > a || (m[0] == a && m[1] > b)) hi = mid - 1;
+    else return m[2];
+  }
+  return -1;
+}
+
+// Walk the [i32 len][bytes] piece records to the given id.
+static bool ctk2_piece(const Tokenizer* tk, int id, const char** str, int* len) {
+  if (id < 0 || id >= tk->vocab_size) return false;
+  const uint8_t* p   = tk->pieces;
+  const uint8_t* end = tk->base + tk->size;
+  for (int i = 0; i < tk->vocab_size; i++) {
+    if (p + 4 > end) return false;
+    int32_t l; memcpy(&l, p, 4); p += 4;
+    if (l < 0 || p + l > end) return false;
+    if (i == id) { *str = (const char*)p; *len = l; return true; }
+    p += l;
+  }
+  return false;
+}
+
+// Exact byte-level BPE: start from per-byte tokens, then repeatedly merge the
+// adjacent pair whose merge result has the lowest id (GPT-2 id order == merge
+// rank order). No BOS/EOS, no dummy space.
+static void ctk2_encode(Tokenizer* tk, const char* text, int* tokens, int* n_tokens) {
+  int n = 0;
+  for (const unsigned char* c = (const unsigned char*)text; *c; c++)
+    tokens[n++] = tk->byte_ids[*c];
+
+  while (n > 1) {
+    int best_c = -1, best_idx = -1;
+    for (int i = 0; i < n - 1; i++) {
+      int c = ctk2_find_merge(tk, tokens[i], tokens[i+1]);
+      if (c >= 0 && (best_c < 0 || c < best_c)) { best_c = c; best_idx = i; }
+    }
+    if (best_idx < 0) break;
+    tokens[best_idx] = best_c;
+    for (int i = best_idx + 1; i < n - 1; i++) tokens[i] = tokens[i+1];
+    n--;
+  }
+  *n_tokens = n;
 }
 
 // Walk the tokenizer blob. `cb(id, score, str, len)` returns true to stop early.
@@ -471,6 +725,11 @@ static bool merge_scan_cb(void* c, int id, float score, const char* str, int len
 
 void llm_encode(Tokenizer* tk, const char* text, int8_t bos, int8_t eos,
                 int* tokens, int* n_tokens) {
+  if (tk->style == ARCH_GPTNEO) {
+    ctk2_encode(tk, text, tokens, n_tokens);   // bos/eos ignored (GPT-2 has none)
+    return;
+  }
+
   *n_tokens = 0;
   if (bos) tokens[(*n_tokens)++] = 1;
 
@@ -544,6 +803,17 @@ void llm_encode(Tokenizer* tk, const char* text, int8_t bos, int8_t eos,
 }
 
 const char* llm_decode(Tokenizer* tk, int prev, int token, char* scratch, size_t scratch_size) {
+  if (tk->style == ARCH_GPTNEO) {
+    if (token == tk->eos_id) return "";
+    const char* str; int len;
+    if (!ctk2_piece(tk, token, &str, &len)) return "";
+    if (scratch_size == 0) return "";
+    size_t cp = (size_t)len < scratch_size - 1 ? (size_t)len : scratch_size - 1;
+    memcpy(scratch, str, cp);
+    scratch[cp] = 0;
+    return scratch;
+  }
+
   const char* str = NULL; int len = 0;
   if (!tok_byid(tk, token, &str, &len, NULL)) return "";
 

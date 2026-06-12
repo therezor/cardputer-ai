@@ -1,0 +1,6 @@
+{
+  "train_samples": 76525,
+  "val_samples": 772,
+  "chat_chars": 17149588,
+  "story_chars": 7349823
+}

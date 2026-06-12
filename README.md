@@ -1,133 +1,164 @@
-# cardputer_ai — TinyLLama-v0 on the M5Stack Cardputer ADV
+# cardputer_ai — a tiny chatbot on the M5Stack Cardputer ADV
 
-A llama2.c-style inference engine running [Maykeye/TinyLLama-v0][hf] (4.6M params,
-8 layers, 32K-vocab SentencePiece tokenizer) on the **Cardputer ADV**
-(ESP32-S3FN8, 512 KB SRAM, 8 MB flash, no PSRAM).
+An on-device chatbot for the **Cardputer ADV** (ESP32-S3FN8, 512 KB SRAM,
+8 MB flash, no PSRAM). It makes small talk with multi-turn memory and writes
+stories on request, fully offline at ~7 tok/s.
+
+The model is [roneneldan/TinyStories-Instruct-3M][hf-neo] (GPT-Neo) fine-tuned
+on ~70K simple-English dialogues (filtered [allenai/SODA][soda], formatted
+`User: ...\nBot: ...<|endoftext|>`, loss masked to bot replies) mixed with 30%
+story data so the story skill survives. The fine-tune runs in ~30 min on an
+Apple-Silicon Mac via `tools/finetune_chat.py`.
+
+[soda]: https://huggingface.co/datasets/allenai/soda
+
+The engine also still runs the original [Maykeye/TinyLLama-v0][hf-llama]
+completion model — the embedded model's header selects the architecture
+(LLaMA vs GPT-Neo) at boot. Swap models by re-running the matching converter.
 
 Weights are quantized to **Q4_0** and embedded into the firmware binary, so
 flashing through [bmorcelli/Launcher][lc] installs everything in one step —
 no SD card, no model partition flashing, no setup.
 
-Matmul rows are split across both ESP32-S3 cores. Expect roughly **2–5 tok/s**
-during generation.
-
-[hf]: https://huggingface.co/Maykeye/TinyLLama-v0
+[hf-neo]: https://huggingface.co/roneneldan/TinyStories-Instruct-3M
+[hf-llama]: https://huggingface.co/Maykeye/TinyLLama-v0
 [lc]: https://github.com/bmorcelli/Launcher
+
+## Modes
+
+- **chat** (default): turn-taking small talk. The firmware rebuilds the
+  training format every turn — recent exchanges joined by EOS tokens — and
+  trims the oldest exchanges to fit the prompt budget. `/new` resets the
+  conversation. Replies end when the model emits EOS (it learned to stop).
+- **story**: wraps your text as `Summary: <text>\nStory:` — type what the
+  story should be about, get that story.
+- **raw**: plain completion, no wrapper (works with the old LLaMA model too).
+
+Honest limits: kindergarten English, no world knowledge (factual questions
+get friendly confabulation), and an 80-token context (~3 short exchanges of
+memory).
+
+## Fine-tune pipeline (rebuild the chat model from scratch)
+
+```sh
+../cardputer_ai_venv/bin/python tools/prepare_chat_data.py --dialogues 150000   # ~5 min
+../cardputer_ai_venv/bin/python tools/finetune_chat.py --epochs 3 \
+    --out-dir data/chat_model_masked                             # ~30 min MPS
+../cardputer_ai_venv/bin/python tools/convert_tinystories_instruct.py \
+    --model-dir data/chat_model_masked --corpus data/chat_train.txt
+```
+
+Loss is masked to bot replies and story bodies (the model never trains on
+producing user turns), and chat samples are tokenized segment-by-segment in
+exactly the shapes the firmware feeds at inference.
+
+NOTE: keep the venv (and anything containing PyTorch) outside the sketch
+directory — the Arduino IDE's sketch scanner walks the folder and errors on
+torch's header filenames.
 
 ## What's in the box
 
 ```
 cardputer_ai/
-├── cardputer_ai.ino           boot + chat loop
-├── llm.{h,cpp}                Q4_0 inference engine, dual-core matmul
+├── cardputer_ai.ino           boot + chat loop + story-mode prompt wrapper
+├── llm.{h,cpp}                Q4_0 engine: LLaMA + GPT-Neo forward paths,
+│                              dual-core matmul, exact byte-level BPE
 ├── ui.{h,cpp}                 chat UI
 ├── partitions.csv             6 MB factory app slot for app + embedded model
-├── model_data.cpp             generated — Q4 model bytes (~2.5 MB)
-├── tok_data.cpp               generated — SentencePiece tokenizer (~500 KB)
+├── model_data.cpp             generated — Q4 model bytes (~1.9 MB for 3M)
+├── tok_data.cpp               generated — pruned GPT-2 tokenizer (~190 KB)
 └── tools/
-    └── convert_tinyllama_v0.py   one-time HF → Q4_0 converter
+    ├── convert_tinystories_instruct.py   HF GPT-Neo → Q4_0 + pruned vocab
+    ├── convert_tinyllama_v0.py           the old TinyLLama-v0 converter
+    └── host/                             macOS/Linux test harness for llm.cpp
 ```
 
 ## One-time setup
 
-You need Python + pip to convert the model once. From the sketch directory:
-
 ```sh
-python -m pip install huggingface_hub safetensors sentencepiece numpy
-python tools/convert_tinyllama_v0.py
+python3 -m venv ../cardputer_ai_venv  # OUTSIDE the sketch dir - the Arduino IDE
+                                       # sketch scanner chokes on torch headers
+../cardputer_ai_venv/bin/pip install huggingface_hub tokenizers torch numpy datasets transformers
+../cardputer_ai_venv/bin/python tools/convert_tinystories_instruct.py            # base 3M model
+../cardputer_ai_venv/bin/python tools/convert_tinystories_instruct.py --model 8M # bigger, ~5MB
 ```
 
-The converter downloads `Maykeye/TinyLLama-v0` from Hugging Face, quantizes
-the weights to Q4_0, and writes **`model_data.cpp`** and **`tok_data.cpp`**
-next to `cardputer_ai.ino`. Arduino IDE picks both files up automatically
-as part of the sketch.
+The converter downloads the model, prunes the 50,257-token GPT-2 vocab to the
+~12K tokens the TinyStories dataset actually uses (closed under BPE merge
+derivation, so encoding stays exact), quantizes to Q4_0, and writes
+**`model_data.cpp`** / **`tok_data.cpp`** next to the sketch.
 
-`model_data.cpp` ends up around 7–8 MB of source text (a long `uint8_t`
-literal). The compiler is fine with it but the first build is slow (~30s for
-parsing+codegen of the byte array).
+Why prune? The full GPT-2 embedding table would be 13M params — bigger than
+the 3M transformer itself — and a 50K-logit buffer (196 KB) doesn't fit our
+heap. Pruned: 1.84 MB total model, 48 KB logits.
 
 ## Build & flash
 
-Arduino IDE 2.x with the M5Stack ESP32 board package:
+Arduino IDE 2.x with the M5Stack board package (or `arduino-cli`):
 
-- Board: **M5Stack-CardputerADV**
+- Board: **M5Cardputer** / **M5Stack-CardputerADV**
 - PSRAM: **Disabled**
 - Flash Size: **8 MB (64 Mb)**
-- Partition Scheme: **Custom** — Arduino picks up `partitions.csv` from the
-  sketch folder automatically.
-- (Recommended) Library Manager → install `esp-dsp` for the SIMD dot product.
+- Partition Scheme: **Custom** (picks up `partitions.csv` automatically)
 
-Then either:
-
-- **Flash via USB** straight from Arduino IDE — fastest iteration loop.
-- **Flash via bmorcelli/Launcher**: export the compiled `.bin`
-  (Sketch → Export Compiled Binary), then in Launcher use
-  *Install from SD card* or *Install from web* with that file. Launcher
-  honors our `partitions.csv`, so the 6 MB factory slot is created on first
-  install.
-
-## How it works
-
-```
-boot ──> map embedded model from flash ──> chat
-                                            │
-                                            ▼
-                                       per-token:
-                                       ─ dequant 1 row of token_embedding
-                                       ─ 8 layers (Q4 matmul on both cores)
-                                       ─ Q4 classifier → 32K logits
-                                       ─ argmax / multinomial sample
+```sh
+arduino-cli compile -b m5stack:esp32:m5stack_cardputer \
+  --board-options PartitionScheme=custom,FlashSize=8M .
 ```
 
-Weights are Q4_0 quantized in blocks of 32 (2-byte BF16 scale + 16 bytes of
-packed nibbles → 18 bytes per block, 7× smaller than fp32). The forward pass
-loads the active row of each weight tensor straight from the MMU-mapped
-flash region — there's no scratch buffer and no SD I/O on the hot path.
+Flash via USB from the IDE, or export the compiled binary and install with
+bmorcelli/Launcher as before.
 
-`llm.cpp::dot_q4_f32` is the inner loop. It decodes 32 nibbles per block and
-multiplies them by 32 fp32 activations. The matmul caller splits rows between
-core 0 (a long-lived worker task) and core 1 (the Arduino loop task), with a
-pair of binary semaphores for the join.
+## Host testing (no hardware needed)
+
+`tools/host/` stubs the ESP32 APIs so the exact engine code runs on your Mac:
+
+```sh
+../cardputer_ai_venv/bin/python tools/convert_tinystories_instruct.py --keep-bin --no-cpp
+clang++ -std=c++17 -O2 -I tools/host tools/host/host_test.cpp llm.cpp -o /tmp/llm_host
+/tmp/llm_host embed/model_neo_q4.bin embed/tok_neo.bin \
+  "Summary: a girl finds a lost cat.\nStory:" --temp 0.8 --kv 80
+```
 
 ## Memory budget (Cardputer ADV, ~280 KB free heap)
 
-| Buffer                            | Bytes    |
-|-----------------------------------|----------|
-| KV cache, ctx=32, fp32            | 128 KB   |
-| Logits (vocab=32000)              | 128 KB   |
-| Activations + attention scores    |  ~10 KB  |
-| FreeRTOS + matmul worker stack    |   4 KB   |
+| Buffer                              | Bytes    |
+|-------------------------------------|----------|
+| KV cache, ctx=80, int8 + row scales | ~170 KB  |
+| Logits (vocab=12060)                | 48 KB    |
+| Activations + attention scores      | ~12 KB   |
+| FreeRTOS + matmul worker stack      | 4 KB     |
 
-Top-p sampling is intentionally **dropped** — its `probindex` would cost
-another 256 KB, which we don't have. Argmax (T=0) and full multinomial
-sampling work fine.
+The GPT-Neo KV cache is stored as **int8 with one fp32 scale per row** (the
+LLaMA path keeps bf16) — at dim=128 that's 2 KB/position, which is what makes
+an 80-token window fit. `KV_SEQ_LEN` lives in `cardputer_ai.ino`; the model
+ships 256 position embeddings, so RAM is the binding constraint, not flash.
 
-The KV-cache window is `KV_SEQ_LEN = 32` in `cardputer_ai.ino`. Raising it
-linearly grows the KV cache — past ~48 the heap runs out.
+## Engine notes
 
-## Regenerating with a different model
-
-The converter currently hard-codes the Maykeye architecture
-(dim=64, n_layers=8, n_heads=16, hidden_dim=256, vocab=32000). Any other
-LLaMA-architecture model with the same shape will work just by pointing
-`--model-dir` at a local HF snapshot:
-
-```sh
-python tools/convert_tinyllama_v0.py --model-dir /path/to/local/hf/snapshot
-```
-
-Larger architectures need the constants in `convert_tinyllama_v0.py` updated
-and (more importantly) need to physically fit — anything past ~3.5 MB Q4 will
-overflow the factory partition.
+- GPT-Neo forward path: LayerNorm (+bias), learned position embeddings,
+  GELU MLP, and — faithful to the original — **no 1/sqrt(d) attention
+  scaling**. The alternating "local attention" layers have a 256-token
+  window ≥ our context, so they degenerate to global causal attention.
+- Tokenizer is **exact** GPT-2 byte-level BPE: the blob embeds the merge
+  pair table (binary-searched from flash); verified 0 mismatches vs
+  HuggingFace on 500 dataset lines.
+- Q4 logits match the fp32 HF reference closely (top-3 identical on test
+  prompts); divergence in long greedy decodes is normal quantization noise.
 
 ## What's not great yet
 
-- 32-token context. The KV cache + 128 KB logits buffer are the binding
-  constraints. With PSRAM this would lift to 2048.
-- Encoding a prompt walks the 32K-token tokenizer once per BPE merge pass,
-  which is a few hundred ms for normal-length prompts. Fine for chat;
-  noticeable if you paste a paragraph.
-- TinyLLama-v0 is trained on TinyStories — it's a *completion* model. Good
-  prompts: `Once upon a time there was`. Bad prompts: `How do I cook rice?`.
-- Generation tops out around 2–5 tok/s. SIMD-accelerated Q4 matmul on
-  ESP32-S3 PIE would roughly double it but isn't implemented yet.
+- 80 tokens of context ≈ 3 short exchanges of conversational memory; older
+  turns silently fall out of the prompt.
+- No facts, only vibes — for factual Q&A you'd need Wi-Fi + an API, or
+  different hardware.
+- ~7 tok/s measured on device. ESP32-S3 PIE SIMD for the Q4 dot product
+  would roughly double it but isn't implemented.
+- Chat quality is bounded by 3M params and the 47%-yield SODA filter; the
+  next quality lever is more/better dialogue data, not more epochs.
+
+## License
+
+Code: MIT (see LICENSE). The embedded model derives from
+TinyStories-Instruct-3M and the SODA dialogue dataset (CC BY 4.0) — see
+NOTICE.md for full third-party attributions.

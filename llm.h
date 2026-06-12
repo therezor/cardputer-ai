@@ -12,6 +12,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+enum LlmArch { ARCH_LLAMA = 1, ARCH_GPTNEO = 2 };
+
 typedef struct {
   int dim;
   int hidden_dim;
@@ -19,9 +21,10 @@ typedef struct {
   int n_heads;
   int n_kv_heads;
   int vocab_size;
-  int seq_len;     // max from training; runtime KV is smaller
+  int seq_len;     // llama: training max; gptneo: wpe rows kept (= hard ctx cap)
   int quant_type;  // 4 = Q4_0
   int shared_classifier;
+  int arch;        // LlmArch
 } Config;
 
 typedef struct {
@@ -35,10 +38,16 @@ typedef struct {
   float* v;       // [kv_dim] fp32 scratch for the current position
   float* att;     // [n_heads, kv_seq_len]
   float* logits;  // [vocab_size]
-  // KV cache is stored as bf16 (2 KB/position instead of 4 KB), which is what
+  // LLaMA path: KV cache stored as bf16 (2 KB/position instead of 4 KB), which
   // lets KV_SEQ_LEN=64 fit in the same 128 KB an fp32 cache needed for 32.
   uint16_t* key_cache;   // bf16 [n_layers, kv_seq_len, kv_dim]
   uint16_t* value_cache; // bf16 [n_layers, kv_seq_len, kv_dim]
+  // GPT-Neo path: dim is 2x the llama model's, so bf16 would halve the usable
+  // context. int8 with one fp32 scale per row keeps 80 positions in ~165 KB.
+  int8_t* key_cache8;    // int8 [n_layers, kv_seq_len, kv_dim]
+  int8_t* value_cache8;  // int8 [n_layers, kv_seq_len, kv_dim]
+  float*  k_scales;      // fp32 [n_layers, kv_seq_len]
+  float*  v_scales;      // fp32 [n_layers, kv_seq_len]
 } RunState;
 
 typedef struct {
@@ -48,9 +57,19 @@ typedef struct {
   const uint8_t* base;   // start of embedded model bytes
 
   // Pointers into `base` (set after parsing the header).
+  // For GPT-Neo, rms_att/rms_ffn/rms_final hold the LayerNorm gammas (ln_1,
+  // ln_2, ln_f) and the *_b pointers below hold the betas; w1/w2 are the MLP
+  // c_fc/c_proj matrices and w3 is unused.
   const float* rms_att;          // fp32 [n_layers, dim]
   const float* rms_ffn;          // fp32 [n_layers, dim]
   const float* rms_final;        // fp32 [dim]
+  const float* ln_att_b;         // gptneo: fp32 [n_layers, dim]
+  const float* ln_ffn_b;         // gptneo: fp32 [n_layers, dim]
+  const float* ln_final_b;       // gptneo: fp32 [dim]
+  const float* bo;               // gptneo: attn out_proj bias [n_layers, dim]
+  const float* b_fc;             // gptneo: mlp c_fc bias [n_layers, hidden_dim]
+  const float* b_proj;           // gptneo: mlp c_proj bias [n_layers, dim]
+  const float* wpe;              // gptneo: position embeddings [seq_len, dim]
   const uint8_t* token_embed_q4; // Q4_0 [vocab, dim]
   const uint8_t* wq_q4, *wk_q4, *wv_q4, *wo_q4;
   const uint8_t* w1_q4, *w2_q4, *w3_q4;
@@ -63,11 +82,23 @@ typedef struct {
 
 // Walking tokenizer — no in-RAM vocab table. The tokenizer.bin lives in flash
 // and we linear-scan it for each lookup. Trades CPU for ~128 KB of heap.
+//
+// Two blob formats are supported:
+//   - llama2.c style (SentencePiece): [u32 max_len] then [f32 score][i32 len][bytes]*
+//   - CTK2 (GPT-2 byte-level BPE, pruned): [u32 magic][i32 vocab][i32 max_len]
+//     [i32 eos][i32 n_merges][u16 byte_ids[256]][(u16 a,u16 b,u16 c) sorted by
+//     (a,b)]* then [i32 len][bytes]* — exact BPE via the merge pair table.
 typedef struct {
   const uint8_t* base;        // start of tokenizer blob (in flash)
   size_t size;
   int vocab_size;
   int max_token_length;
+  int style;                  // ARCH_LLAMA (sentencepiece) or ARCH_GPTNEO (bpe)
+  int eos_id;                 // gptneo: <|endoftext|> id in the pruned vocab
+  int n_merges;               // gptneo
+  const uint16_t* byte_ids;   // gptneo: byte -> token id [256]
+  const uint16_t* merges;     // gptneo: (a,b,c) triples sorted by (a,b)
+  const uint8_t* pieces;      // gptneo: start of [i32 len][bytes] records
   char byte_pieces[512];      // 256 single-byte fallback pieces (data only)
 } Tokenizer;
 
