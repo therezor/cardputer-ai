@@ -1,8 +1,10 @@
-# cardputer_ai — a tiny chatbot on the M5Stack Cardputer ADV
+# Cardputer AI — a tiny local chatbot for the ESP32 Cardputer ADV
 
-An on-device chatbot for the **Cardputer ADV** (ESP32-S3FN8, 512 KB SRAM,
-8 MB flash, no PSRAM). It makes small talk with multi-turn memory and writes
-stories on request, fully offline at ~7 tok/s.
+A fully local, offline chatbot running on the **M5Stack Cardputer ADV**
+(ESP32-S3FN8, 512 KB SRAM, 8 MB flash, no PSRAM). No Wi-Fi, no API, no SD
+card — the LLM lives in the firmware and runs on the microcontroller itself.
+It makes small talk with multi-turn memory and writes stories on request,
+at ~7 tok/s.
 
 The model is [roneneldan/TinyStories-Instruct-3M][hf-neo] (GPT-Neo) fine-tuned
 on ~70K simple-English dialogues (filtered [allenai/SODA][soda], formatted
