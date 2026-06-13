@@ -56,7 +56,8 @@ enum ChatMode { M_CHAT, M_STORY, M_RAW };
 
 struct Settings {
   float temp      = DEFAULT_TEMP;     // 0.0 = greedy (argmax)
-  int   max_reply = 44;               // tokens per reply; rest is prompt budget
+  int   max_reply = 44;               // tokens per reply; -1 = unlimited (stop at KV or EOS);
+                                      // -2 = unsafe (wrap KV pos, run until EOS fires)
   int   mode      = M_CHAT;
 };
 static Settings settings;
@@ -78,7 +79,9 @@ static void drawSettings() {
   snprintf(tbuf, sizeof(tbuf), "%.1f", settings.temp);
   values[0] = modeName(settings.mode);
   values[1] = settings.temp < 0.05f ? "0.0 greedy" : tbuf;
-  values[2] = std::to_string(settings.max_reply);
+  values[2] = settings.max_reply == -2 ? "unsafe" :
+              settings.max_reply <  0  ? "unlimited" :
+                                         std::to_string(settings.max_reply);
   values[3] = "reroll with , /";
   ui.showSettings("Settings", names, values, SETT_N, sett_sel);
 }
@@ -94,7 +97,11 @@ static void adjustSetting(int dir) {
       sampler.temperature = settings.temp;        // takes effect immediately
       break;
     case 2:
-      settings.max_reply = clampi(settings.max_reply + dir, 4, KV_SEQ_LEN - 8);
+      if      (dir < 0 && settings.max_reply == -1) settings.max_reply = -2;
+      else if (dir < 0 && settings.max_reply <= 4)  settings.max_reply = -1;
+      else if (dir > 0 && settings.max_reply == -2) settings.max_reply = -1;
+      else if (dir > 0 && settings.max_reply <  0)  settings.max_reply = 4;
+      else settings.max_reply = clampi(settings.max_reply + dir, 4, KV_SEQ_LEN - 8);
       break;
     case 3:
       llm_build_sampler(&sampler, transformer.config.vocab_size,
@@ -143,6 +150,7 @@ struct GenState {
   std::string user_text;   // chat mode: pending exchange for the history
   std::string bot_text;
   bool pending_nl = false; // hold back a lone "\n" until we know what follows
+  bool wrapped    = false; // true if unsafe mode has wrapped pos (context corrupted)
 } gen;
 
 static void initModel() {
@@ -185,7 +193,7 @@ static void beginGeneration(const std::string& user_text) {
 
   // Leave room for the reply: everything the prompt doesn't use, the model
   // can spend on talking back.
-  int budget = KV_SEQ_LEN - settings.max_reply - 1;
+  int budget = KV_SEQ_LEN - (settings.max_reply >= 0 ? settings.max_reply : 0) - 1;
   if (budget < 8) budget = 8;
 
   if (gen.prompt_tokens) { free(gen.prompt_tokens); gen.prompt_tokens = nullptr; }
@@ -260,18 +268,33 @@ static void beginGeneration(const std::string& user_text) {
   gen.tokens_out  = 0;
   gen.bot_text    = "";
   gen.pending_nl  = false;
+  gen.wrapped     = false;
   ui.beginBotReply();
 }
 
 static void finishReply() {
   gen.active = false;
+  bool was_wrapped = gen.wrapped;
   if (settings.mode == M_CHAT && tokenizer.style == ARCH_GPTNEO && gen.bot_text.length())
     historyPush(gen.user_text, gen.bot_text);
   ui.endBotReply(gen.tokens_out, millis() - gen.t_start_ms);
+  if (was_wrapped) {
+    int total_tok = gen.tokens_out;
+    historyClear();
+    ui.statusf("context wrapped - %d tokens - new convo", total_tok);
+  }
 }
 
 static void stepGeneration() {
-  if (gen.pos >= KV_SEQ_LEN - 1 || gen.tokens_out >= settings.max_reply) {
+  if (gen.pos >= KV_SEQ_LEN - 1) {
+    if (settings.max_reply == -2) {
+      gen.pos     = gen.n_prompt;  // wrap: overwrite output KV region, keep going
+      gen.wrapped = true;
+    } else {
+      finishReply(); return;
+    }
+  }
+  if (settings.max_reply >= 0 && gen.tokens_out >= settings.max_reply) {
     finishReply();
     return;
   }
@@ -353,7 +376,17 @@ static void loop() {
   }
   if (state != ST_CHAT) return;
 
-  if (gen.active) { ui.tickGenerating(gen.tokens_out); stepGeneration(); return; }
+  if (gen.active) {
+    ui.tickGenerating(gen.tokens_out);
+    if (Keyboard.isChange() && Keyboard.isPressed()) {
+      auto st = Keyboard.keysState();
+      for (char c : st.word) {
+        if (c == '`') { finishReply(); return; }
+      }
+    }
+    stepGeneration();
+    return;
+  }
   if (Keyboard.isChange() && Keyboard.isPressed()) {
     auto st = Keyboard.keysState();
     if (st.tab) {                      // open settings (only when idle)
