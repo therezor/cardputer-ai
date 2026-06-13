@@ -7,27 +7,35 @@
 // selects the architecture at boot.
 //
 // Chat mode wraps whatever you type into the instruction format the model was
-// trained on ("Summary: <your text>\nStory:"), so asking for "a dragon who
+// trained on ("Summary: <your text>\nStory:", so asking for "a dragon who
 // learns to share" gets a story about exactly that. Raw mode feeds your text
 // in unchanged (plain completion).
 
-#include <M5Cardputer.h>
+#include <M5Unified.h>
+#include <esp_random.h>
+#include <string>
+#include <math.h>
+#include <string.h>
+#include <stdlib.h>
+#include "keyboard/Keyboard.h"
 #include "llm.h"
 #include "ui.h"
+#include "port.h"
 
 // Symbols defined by the generated model_data.cpp and tok_data.cpp (produced
-// by tools/convert_tinyllama_v0.py). They land in the .rodata section, which
-// the ESP32-S3 maps from flash directly into the data address space — so
+// by tools/convert_tinystories_instruct.py). They land in the .rodata section,
+// which the ESP32-S3 maps from flash directly into the data address space — so
 // inference reads them as if they were ordinary RAM.
 extern "C" const uint8_t MODEL_DATA[];
 extern "C" const size_t  MODEL_DATA_LEN;
 extern "C" const uint8_t TOKENIZER_DATA[];
 extern "C" const size_t  TOKENIZER_DATA_LEN;
 
-static Transformer transformer;
-static Tokenizer   tokenizer;
-static Sampler     sampler;
-static ChatUI      ui;
+static Transformer    transformer;
+static Tokenizer      tokenizer;
+static Sampler        sampler;
+static ChatUI         ui;
+static Keyboard_Class Keyboard;   // vendored M5Cardputer driver (main/keyboard/)
 
 // KV-cache window. dim=128 × 8 layers × (k+v) at int8 ≈ 2 KB per position
 // (llm.cpp stores the GPT-Neo cache as int8 with per-row scales); 80 positions
@@ -38,6 +46,9 @@ static constexpr float DEFAULT_TEMP = 0.8f;
 
 enum AppState { ST_BOOT, ST_CHAT, ST_SETTINGS };
 static AppState state = ST_BOOT;
+
+static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+static int   clampi(int v, int lo, int hi)       { return v < lo ? lo : (v > hi ? hi : v); }
 
 // ---------- Settings ----------
 
@@ -61,11 +72,13 @@ static const char* modeName(int m) {
 }
 
 static void drawSettings() {
-  String names[SETT_N]  = {"Mode", "Temperature", "Max reply tokens", "RNG seed"};
-  String values[SETT_N];
+  std::string names[SETT_N]  = {"Mode", "Temperature", "Max reply tokens", "RNG seed"};
+  std::string values[SETT_N];
+  char tbuf[16];
+  snprintf(tbuf, sizeof(tbuf), "%.1f", settings.temp);
   values[0] = modeName(settings.mode);
-  values[1] = settings.temp < 0.05f ? String("0.0 greedy") : String(settings.temp, 1);
-  values[2] = String(settings.max_reply);
+  values[1] = settings.temp < 0.05f ? "0.0 greedy" : tbuf;
+  values[2] = std::to_string(settings.max_reply);
   values[3] = "reroll with , /";
   ui.showSettings("Settings", names, values, SETT_N, sett_sel);
 }
@@ -77,11 +90,11 @@ static void adjustSetting(int dir) {
       break;
     case 1:
       settings.temp = roundf((settings.temp + 0.1f * dir) * 10.0f) / 10.0f;
-      settings.temp = constrain(settings.temp, 0.0f, 2.0f);
+      settings.temp = clampf(settings.temp, 0.0f, 2.0f);
       sampler.temperature = settings.temp;        // takes effect immediately
       break;
     case 2:
-      settings.max_reply = constrain(settings.max_reply + dir, 4, KV_SEQ_LEN - 8);
+      settings.max_reply = clampi(settings.max_reply + dir, 4, KV_SEQ_LEN - 8);
       break;
     case 3:
       llm_build_sampler(&sampler, transformer.config.vocab_size,
@@ -97,10 +110,10 @@ static void adjustSetting(int dir) {
 // we rebuild exactly that token stream every turn, inserting eos_id between
 // exchanges by hand (the EOS string isn't reachable through BPE merges).
 static constexpr int HIST_MAX = 4;
-static String hist_user[HIST_MAX], hist_bot[HIST_MAX];
-static int    hist_n = 0;
+static std::string hist_user[HIST_MAX], hist_bot[HIST_MAX];
+static int         hist_n = 0;
 
-static void historyPush(const String& u, const String& b) {
+static void historyPush(const std::string& u, const std::string& b) {
   if (hist_n == HIST_MAX) {
     for (int i = 1; i < HIST_MAX; i++) { hist_user[i-1] = hist_user[i]; hist_bot[i-1] = hist_bot[i]; }
     hist_n--;
@@ -127,8 +140,8 @@ struct GenState {
   int* prompt_tokens = nullptr;
   uint32_t t_start_ms = 0;
   int tokens_out = 0;
-  String user_text;        // chat mode: pending exchange for the history
-  String bot_text;
+  std::string user_text;   // chat mode: pending exchange for the history
+  std::string bot_text;
   bool pending_nl = false; // hold back a lone "\n" until we know what follows
 } gen;
 
@@ -151,7 +164,7 @@ static void initModel() {
 }
 
 // Encode `text` into gen.prompt_tokens starting at *n (bounds-checked).
-static bool appendSegment(const String& text, int cap, int* n) {
+static bool appendSegment(const std::string& text, int cap, int* n) {
   int  m = 0;
   int* tmp = (int*) malloc(sizeof(int) * (text.length() + 8));
   if (!tmp) return false;
@@ -162,7 +175,7 @@ static bool appendSegment(const String& text, int cap, int* n) {
   return ok;
 }
 
-static void beginGeneration(const String& user_text) {
+static void beginGeneration(const std::string& user_text) {
   // Prompt shapes (chat/story match the two training formats):
   //   chat : User: <u1>\nBot: <b1><eos>\nUser: <u2>\nBot:
   //   story: Summary: <text>\nStory:
@@ -185,7 +198,7 @@ static void beginGeneration(const String& user_text) {
     // until the budget is full, then emit oldest -> newest.
     int* seg_toks[HIST_MAX + 1];
     int  seg_len[HIST_MAX + 1];
-    String segs[HIST_MAX + 1];
+    std::string segs[HIST_MAX + 1];
     for (int i = 0; i < hist_n; i++)
       segs[i] = "User: " + hist_user[i] + "\nBot:" + hist_bot[i];
     segs[hist_n] = "User: " + user_text + "\nBot:";
@@ -304,9 +317,10 @@ static void stepGeneration() {
   gen.pos++;
 }
 
-void setup() {
+static void setup() {
   auto cfg = M5.config();
-  M5Cardputer.begin(cfg, true);
+  M5.begin(cfg);
+  Keyboard.begin();    // picks IOMatrix or TCA8418 reader from M5.getBoard()
   ui.begin();
 
   ui.status("TinyStories booting...");
@@ -319,12 +333,14 @@ void setup() {
   state = ST_CHAT;
 }
 
-void loop() {
-  M5Cardputer.update();
+static void loop() {
+  M5.update();
+  Keyboard.updateKeyList();
+  Keyboard.updateKeysState();
 
   if (state == ST_SETTINGS) {
-    if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
-      auto st = M5Cardputer.Keyboard.keysState();
+    if (Keyboard.isChange() && Keyboard.isPressed()) {
+      auto st = Keyboard.keysState();
       if (st.tab || st.enter) { leaveSettings(); return; }
       for (char c : st.word) {
         if (c == ';') { sett_sel = (sett_sel + SETT_N - 1) % SETT_N; drawSettings(); }
@@ -338,8 +354,8 @@ void loop() {
   if (state != ST_CHAT) return;
 
   if (gen.active) { ui.tickGenerating(gen.tokens_out); stepGeneration(); return; }
-  if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
-    auto st = M5Cardputer.Keyboard.keysState();
+  if (Keyboard.isChange() && Keyboard.isPressed()) {
+    auto st = Keyboard.keysState();
     if (st.tab) {                      // open settings (only when idle)
       state = ST_SETTINGS;
       sett_sel = 0;
@@ -357,7 +373,7 @@ void loop() {
       for (char c : st.word) ui.onChar(c);
       if (st.del)   ui.onBackspace();
       if (st.enter) {
-        String prompt = ui.takeInput();
+        std::string prompt = ui.takeInput();
         if (prompt == "/new") {
           historyClear();
           ui.statusf("new conversation  [tab] settings");
@@ -367,5 +383,15 @@ void loop() {
         }
       }
     }
+  }
+}
+
+extern "C" void app_main(void) {
+  setup();
+  for (;;) {
+    loop();
+    // Full speed while generating (one token per iteration); when idle, a
+    // 1 ms tick (CONFIG_FREERTOS_HZ=1000) is plenty for keyboard polling.
+    if (!gen.active) vTaskDelay(1);
   }
 }

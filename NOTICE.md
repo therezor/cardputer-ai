@@ -36,6 +36,16 @@ embedded model and tokenizer artifacts derive from the following works:
   Apache-2.0. Supported by the engine via
   `tools/convert_tinyllama_v0.py`.
 
+## Vendored keyboard driver (`main/keyboard/`)
+
+- Ported from **M5Cardputer** v1.1.1
+  (https://github.com/m5stack/M5Cardputer), MIT,
+  Copyright (c) 2025 M5Stack Technology CO LTD. Arduino GPIO/interrupt
+  calls were replaced with ESP-IDF `driver/gpio` equivalents.
+- Includes M5Stack's adaptation of the **Adafruit TCA8418** keypad driver
+  (https://github.com/adafruit/Adafruit_TCA8418), BSD, Copyright (c)
+  Limor Fried (Adafruit Industries).
+
 ## Acknowledgements
 
 - The inference engine follows the structure of Andrej Karpathy's

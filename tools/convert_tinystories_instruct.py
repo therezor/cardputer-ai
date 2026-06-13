@@ -349,8 +349,8 @@ def main():
 
     if not args.no_cpp:
         print("[+] emitting C++ embed sources")
-        emit_cpp_array(model_bin, out_dir / "model_data.cpp", "MODEL_DATA")
-        emit_cpp_array(tok_bin, out_dir / "tok_data.cpp", "TOKENIZER_DATA")
+        emit_cpp_array(model_bin, out_dir / "main" / "model_data.cpp", "MODEL_DATA")
+        emit_cpp_array(tok_bin, out_dir / "main" / "tok_data.cpp", "TOKENIZER_DATA")
 
     if not args.keep_bin and not args.no_cpp:
         model_bin.unlink(); tok_bin.unlink()

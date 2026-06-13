@@ -1,7 +1,11 @@
 #include "ui.h"
+#include "port.h"
+#include <M5Unified.h>
 #include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
 
-static auto& D() { return M5Cardputer.Display; }
+static auto& D() { return M5.Display; }
 
 void ChatUI::chatFont() { D().setFont(&fonts::Font2); D().setTextSize(1); }
 void ChatUI::uiFont()   { D().setFont(&fonts::Font0); D().setTextSize(1); }
@@ -107,19 +111,19 @@ void ChatUI::commitLine() {
 }
 
 // Draw one stored line (text with inline color codes) at pixel row y.
-void ChatUI::drawLine(const String& l, int y) {
+void ChatUI::drawLine(const std::string& l, int y) {
   int x = MARGIN;
   uint16_t col = C_TEXT;
-  String seg;
+  std::string seg;
   auto flush = [&]() {
     if (!seg.length()) return;
     D().setTextColor(col, C_BG);
     D().setCursor(x, y);
-    D().print(seg);
-    x += D().textWidth(seg);
+    D().print(seg.c_str());
+    x += D().textWidth(seg.c_str());
     seg = "";
   };
-  for (unsigned i = 0; i < l.length(); i++) {
+  for (size_t i = 0; i < l.length(); i++) {
     char c = l[i];
     if ((uint8_t)c < 8) { flush(); col = colorFor((uint8_t)c); }
     else seg += c;
@@ -144,13 +148,13 @@ void ChatUI::redrawChat() {
   if (offset_ == 0) {                                 // restore live cursor
     chat_y_ = y - LINE_H;
     int x = MARGIN;
-    String seg;
-    for (unsigned i = 0; i < cur_.length(); i++) {
+    std::string seg;
+    for (size_t i = 0; i < cur_.length(); i++) {
       char c = cur_[i];
-      if ((uint8_t)c < 8) { x += D().textWidth(seg); seg = ""; }
+      if ((uint8_t)c < 8) { x += D().textWidth(seg.c_str()); seg = ""; }
       else seg += c;
     }
-    cursor_x_ = x + D().textWidth(seg);
+    cursor_x_ = x + D().textWidth(seg.c_str());
   }
 }
 
@@ -256,7 +260,7 @@ void ChatUI::repaint() {
 
 // ---------- Settings ----------
 
-void ChatUI::showSettings(const char* title, const String* names, const String* values,
+void ChatUI::showSettings(const char* title, const std::string* names, const std::string* values,
                           int n, int selected) {
   D().fillScreen(C_BG);
   chatFont();
@@ -275,10 +279,10 @@ void ChatUI::showSettings(const char* title, const String* names, const String* 
     D().fillRect(0, y, W, row_h, bg);
     D().setTextColor(i == selected ? C_TEXT : C_DIM, bg);
     D().setCursor(6, y + 1);
-    D().print(names[i]);
+    D().print(names[i].c_str());
     D().setTextColor(i == selected ? C_STATUS : C_BOT, bg);
-    D().setCursor(W - 8 - D().textWidth(values[i]), y + 1);
-    D().print(values[i]);
+    D().setCursor(W - 8 - D().textWidth(values[i].c_str()), y + 1);
+    D().print(values[i].c_str());
   }
 
   D().fillRect(0, H - footer_h, W, footer_h, C_BAR);
@@ -294,15 +298,15 @@ void ChatUI::fatal(const char* s) {
   D().setTextWrap(true);
   chatFont();
   D().setCursor(4, 4);
-  D().setTextColor(WHITE);
+  D().setTextColor(0xFFFF);
   D().print("FATAL: ");
   D().print(s);
-  while (1) delay(1000);
+  while (1) delay_ms(1000);
 }
 
 // ---------- Selector ----------
 
-void ChatUI::showSelector(const char* title, const String* items, const String* subs,
+void ChatUI::showSelector(const char* title, const std::string* items, const std::string* subs,
                           int n, int selected) {
   D().fillScreen(C_BG);
   chatFont();
@@ -327,7 +331,7 @@ void ChatUI::showSelector(const char* title, const String* items, const String* 
     D().fillRect(0, y, W, row_h, bg);
     D().setTextColor(idx == selected ? C_TEXT : C_DIM, bg);
     D().setCursor(6, y + 1);
-    D().print(items[idx]);
+    D().print(items[idx].c_str());
   }
 
   D().fillRect(0, H - footer_h, W, footer_h, C_BAR);
@@ -364,15 +368,15 @@ void ChatUI::onChar(char c) {
 }
 void ChatUI::onBackspace() {
   if (!input_.length()) return;
-  input_.remove(input_.length() - 1);
+  input_.pop_back();
   drawInputBox();
 }
-String ChatUI::takeInput() {
-  String s = input_; input_ = ""; drawInputBox();
+std::string ChatUI::takeInput() {
+  std::string s = input_; input_ = ""; drawInputBox();
   return s;
 }
 
-void ChatUI::appendUser(const String& s) {
+void ChatUI::appendUser(const std::string& s) {
   snapToLive();
   cursor_x_ = MARGIN;
   writeText("> ", C_USER);

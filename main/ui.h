@@ -1,5 +1,7 @@
 #pragma once
-#include <M5Cardputer.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <string>
 
 class ChatUI {
 public:
@@ -10,18 +12,18 @@ public:
   void fatal(const char* s) __attribute__((noreturn));
 
   // Selector screen
-  void showSelector(const char* title, const String* items, const String* subs, int n, int selected);
+  void showSelector(const char* title, const std::string* items, const std::string* subs, int n, int selected);
   void showProgress(const char* label, size_t done, size_t total);
 
   // Settings screen: names left-aligned, values right-aligned.
-  void showSettings(const char* title, const String* names, const String* values, int n, int selected);
+  void showSettings(const char* title, const std::string* names, const std::string* values, int n, int selected);
   void repaint();                    // full redraw of the chat screen
 
   // Chat
   void onChar(char c);
   void onBackspace();
-  String takeInput();
-  void appendUser(const String& s);
+  std::string takeInput();
+  void appendUser(const std::string& s);
   void beginBotReply();
   void appendBot(const char* piece);
   void endBotReply(int tokens, uint32_t ms);
@@ -51,7 +53,7 @@ private:
   static constexpr uint16_t C_STATUS = 0xFFE0;     // yellow status text
   static constexpr uint16_t C_DIM    = 0xC618;     // grey
 
-  String   input_;
+  std::string input_;
   int      chat_y_   = CHAT_Y0;
   int      cursor_x_ = MARGIN;
   bool     in_bot_   = false;
@@ -62,9 +64,9 @@ private:
   // with inline color codes (chars 0x01..0x03, see colorFor). `cur_` is the
   // line still being written at the bottom; offset_ > 0 means the user has
   // scrolled into history (new output snaps back to live).
-  String   lines_[MAX_LINES];
+  std::string lines_[MAX_LINES];
   int      line_count_ = 0;          // total committed lines ever (ring-indexed)
-  String   cur_;
+  std::string cur_;
   uint8_t  cur_color_ = 0;
   int      offset_ = 0;
 
@@ -76,7 +78,7 @@ private:
   void drawInputBox();
   void newline();
   void commitLine();
-  void drawLine(const String& l, int y);
+  void drawLine(const std::string& l, int y);
   void redrawChat();
   void snapToLive();
   void writeText(const char* s, uint16_t color);

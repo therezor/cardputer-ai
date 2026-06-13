@@ -275,7 +275,7 @@ def fetch_model(cache: Path) -> Path:
 
 def emit_cpp_array(bin_path: Path, cpp_path: Path, sym: str):
     """Write a C++ source file with `const uint8_t SYM[] = { ... };` and
-    `const size_t SYM_LEN = ...;` so Arduino IDE picks it up alongside the .ino.
+    `const size_t SYM_LEN = ...;` compiled into the firmware as .rodata.
     Uses 12 bytes per line — good readability without bloating compile time
     relative to longer lines (GCC parses fine either way).
     """
@@ -296,7 +296,7 @@ def emit_cpp_array(bin_path: Path, cpp_path: Path, sym: str):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-dir", default=str(Path(__file__).resolve().parent.parent),
-                    help="sketch directory — model_data.cpp + tok_data.cpp drop here")
+                    help="repo root — model_data.cpp + tok_data.cpp drop into <out-dir>/main/")
     ap.add_argument("--cache",   default=str(Path.home() / ".cache" / "cardputer_ai"),
                     help="HuggingFace download cache dir")
     ap.add_argument("--model-dir", default=None,
@@ -321,8 +321,8 @@ def main():
     convert_tokenizer(model_dir, tok_bin)
 
     print("[+] emitting C++ embed sources")
-    emit_cpp_array(model_bin, out_dir / "model_data.cpp", "MODEL_DATA")
-    emit_cpp_array(tok_bin,   out_dir / "tok_data.cpp",   "TOKENIZER_DATA")
+    emit_cpp_array(model_bin, out_dir / "main" / "model_data.cpp", "MODEL_DATA")
+    emit_cpp_array(tok_bin,   out_dir / "main" / "tok_data.cpp",   "TOKENIZER_DATA")
 
     if not args.keep_bin:
         model_bin.unlink()
@@ -331,10 +331,10 @@ def main():
         except OSError: pass
 
     print()
-    print("Files written next to cardputer_ai.ino:")
-    print(f"  {out_dir / 'model_data.cpp'}")
-    print(f"  {out_dir / 'tok_data.cpp'}")
-    print("Open the sketch in Arduino IDE and Verify/Upload as usual.")
+    print("Files written into the IDF main component:")
+    print(f"  {out_dir / 'main' / 'model_data.cpp'}")
+    print(f"  {out_dir / 'main' / 'tok_data.cpp'}")
+    print("Rebuild with `pio run` (or `idf.py build`).")
 
 
 if __name__ == "__main__":

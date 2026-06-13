@@ -1,4 +1,10 @@
 build/
+.vscode/
+.pio/
+managed_components/
+sdkconfig
+sdkconfig.*
+!sdkconfig.defaults
 .DS_Store
 .claude/
 *.swp

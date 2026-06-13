@@ -1,10 +1,12 @@
 # Cardputer AI — a tiny local chatbot for the ESP32 Cardputer ADV
 
 A fully local, offline chatbot running on the **M5Stack Cardputer ADV**
-(ESP32-S3FN8, 512 KB SRAM, 8 MB flash, no PSRAM). No Wi-Fi, no API, no SD
-card — the LLM lives in the firmware and runs on the microcontroller itself.
-It makes small talk with multi-turn memory and writes stories on request,
-at ~7 tok/s.
+(ESP32-S3FN8, 512 KB SRAM, 8 MB flash, no PSRAM). It also runs on the
+**original M5Stack Cardputer** — the firmware ships both keyboard drivers
+(the ADV's TCA8418 and the original's IO matrix) and picks the right one at
+boot. No Wi-Fi, no API, no SD card — the LLM lives in the firmware and runs
+on the microcontroller itself. It makes small talk with multi-turn memory
+and writes stories on request, at ~7 tok/s.
 
 The model is [roneneldan/TinyStories-Instruct-3M][hf-neo] (GPT-Neo) fine-tuned
 on ~70K simple-English dialogues (filtered [allenai/SODA][soda], formatted
@@ -54,32 +56,40 @@ Loss is masked to bot replies and story bodies (the model never trains on
 producing user turns), and chat samples are tokenized segment-by-segment in
 exactly the shapes the firmware feeds at inference.
 
-NOTE: keep the venv (and anything containing PyTorch) outside the sketch
-directory — the Arduino IDE's sketch scanner walks the folder and errors on
-torch's header filenames.
+NOTE: keep the venv (and anything containing PyTorch) outside the repo so
+build tooling never walks into torch's headers.
 
 ## What's in the box
 
 ```
 cardputer_ai/
-├── cardputer_ai.ino           boot + chat loop + story-mode prompt wrapper
-├── llm.{h,cpp}                Q4_0 engine: LLaMA + GPT-Neo forward paths,
-│                              dual-core matmul, exact byte-level BPE
-├── ui.{h,cpp}                 chat UI
+├── platformio.ini             PlatformIO build (espidf framework, IDF 5.5)
+├── CMakeLists.txt             plain ESP-IDF build (`idf.py build`) works too
+├── sdkconfig.defaults         flash/CPU/WDT config for the Cardputer ADV
 ├── partitions.csv             6 MB factory app slot for app + embedded model
-├── model_data.cpp             generated — Q4 model bytes (~1.9 MB for 3M)
-├── tok_data.cpp               generated — pruned GPT-2 tokenizer (~190 KB)
+├── main/                      the ESP-IDF "main" component
+│   ├── main.cpp               boot + chat loop + story-mode prompt wrapper
+│   ├── llm.{h,cpp}            Q4_0 engine: LLaMA + GPT-Neo forward paths,
+│   │                          dual-core matmul, exact byte-level BPE
+│   ├── ui.{h,cpp}             chat UI
+│   ├── keyboard/              Cardputer keyboard driver, ported to ESP-IDF
+│   │                          from m5stack/M5Cardputer v1.1.1 (MIT)
+│   ├── model_data.cpp         generated — Q4 model bytes (~1.9 MB for 3M)
+│   └── tok_data.cpp           generated — pruned GPT-2 tokenizer (~190 KB)
 └── tools/
     ├── convert_tinystories_instruct.py   HF GPT-Neo → Q4_0 + pruned vocab
     ├── convert_tinyllama_v0.py           the old TinyLLama-v0 converter
     └── host/                             macOS/Linux test harness for llm.cpp
 ```
 
+The display (and board autodetect, power, etc.) comes from the
+`m5stack/m5unified` + `m5stack/m5gfx` managed components, resolved from the
+ESP Component Registry on first build (`main/idf_component.yml`).
+
 ## One-time setup
 
 ```sh
-python3 -m venv ../cardputer_ai_venv  # OUTSIDE the sketch dir - the Arduino IDE
-                                       # sketch scanner chokes on torch headers
+python3 -m venv ../cardputer_ai_venv   # keep the venv outside the repo
 ../cardputer_ai_venv/bin/pip install huggingface_hub tokenizers torch numpy datasets transformers
 ../cardputer_ai_venv/bin/python tools/convert_tinystories_instruct.py            # base 3M model
 ../cardputer_ai_venv/bin/python tools/convert_tinystories_instruct.py --model 8M # bigger, ~5MB
@@ -88,7 +98,7 @@ python3 -m venv ../cardputer_ai_venv  # OUTSIDE the sketch dir - the Arduino IDE
 The converter downloads the model, prunes the 50,257-token GPT-2 vocab to the
 ~12K tokens the TinyStories dataset actually uses (closed under BPE merge
 derivation, so encoding stays exact), quantizes to Q4_0, and writes
-**`model_data.cpp`** / **`tok_data.cpp`** next to the sketch.
+**`main/model_data.cpp`** / **`main/tok_data.cpp`**.
 
 Why prune? The full GPT-2 embedding table would be 13M params — bigger than
 the 3M transformer itself — and a 50K-logit buffer (196 KB) doesn't fit our
@@ -96,20 +106,36 @@ heap. Pruned: 1.84 MB total model, 48 KB logits.
 
 ## Build & flash
 
-Arduino IDE 2.x with the M5Stack board package (or `arduino-cli`):
-
-- Board: **M5Cardputer** / **M5Stack-CardputerADV**
-- PSRAM: **Disabled**
-- Flash Size: **8 MB (64 Mb)**
-- Partition Scheme: **Custom** (picks up `partitions.csv` automatically)
+PlatformIO (the `espidf` framework via the [pioarduino] platform, which ships
+ESP-IDF v5.5 — the official `espressif32` platform stopped at 5.4):
 
 ```sh
-arduino-cli compile -b m5stack:esp32:m5stack_cardputer \
-  --board-options PartitionScheme=custom,FlashSize=8M .
+pio run                # build → .pio/build/cardputer/firmware.bin
+pio run -t upload      # flash over USB
+pio device monitor     # serial logs
 ```
 
-Flash via USB from the IDE, or export the compiled binary and install with
-bmorcelli/Launcher as before.
+One image covers both the original Cardputer and the ADV: they share the
+M5Stamp-S3 module, the keyboard driver is chosen at runtime from
+`M5.getBoard()`, and M5Unified autodetects the display. Flash the same
+`firmware.bin` to either board.
+
+The same tree is a standard ESP-IDF project, so this works too:
+
+```sh
+idf.py build flash monitor
+```
+
+Settings that used to be Arduino IDE menu choices (8 MB flash, DIO/80 MHz, no
+PSRAM, custom partition table, 240 MHz CPU) live in `sdkconfig.defaults`.
+
+For [bmorcelli/Launcher][lc] installs, ship
+`.pio/build/cardputer/firmware.bin` — the partition table in this repo
+keeps the factory app at offset 0x10000, which is where Launcher writes it.
+(`firmware.factory.bin` in the same directory is the full-flash image:
+bootloader + partition table + app, for esptool at offset 0x0.)
+
+[pioarduino]: https://github.com/pioarduino/platform-espressif32
 
 ## Host testing (no hardware needed)
 
@@ -117,7 +143,7 @@ bmorcelli/Launcher as before.
 
 ```sh
 ../cardputer_ai_venv/bin/python tools/convert_tinystories_instruct.py --keep-bin --no-cpp
-clang++ -std=c++17 -O2 -I tools/host tools/host/host_test.cpp llm.cpp -o /tmp/llm_host
+clang++ -std=c++17 -O2 -I tools/host tools/host/host_test.cpp main/llm.cpp -o /tmp/llm_host
 /tmp/llm_host embed/model_neo_q4.bin embed/tok_neo.bin \
   "Summary: a girl finds a lost cat.\nStory:" --temp 0.8 --kv 80
 ```
@@ -133,7 +159,7 @@ clang++ -std=c++17 -O2 -I tools/host tools/host/host_test.cpp llm.cpp -o /tmp/ll
 
 The GPT-Neo KV cache is stored as **int8 with one fp32 scale per row** (the
 LLaMA path keeps bf16) — at dim=128 that's 2 KB/position, which is what makes
-an 80-token window fit. `KV_SEQ_LEN` lives in `cardputer_ai.ino`; the model
+an 80-token window fit. `KV_SEQ_LEN` lives in `main/main.cpp`; the model
 ships 256 position embeddings, so RAM is the binding constraint, not flash.
 
 ## Engine notes

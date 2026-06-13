@@ -1,0 +1,5 @@
+dependencies:
+  idf: ">=5.0"
+  # Display + power + board autodetect (pulls m5stack/m5gfx). 0.2.17 is the
+  # first registry version we verified detects board_M5CardputerADV.
+  m5stack/m5unified: "^0.2.17"

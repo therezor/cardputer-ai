@@ -149,7 +149,7 @@ static void matmul_q4(float* xout, const float* x, const uint8_t* w, int n, int 
   matmul_rows(&self);
 
   xSemaphoreTake(mm_done, portMAX_DELAY);
-  yield();  // feed both cores' IDLE so the WDT stays happy
+  taskYIELD();
 }
 
 // ============================================================================
@@ -288,7 +288,7 @@ static float* forward_llama(Transformer* T, int token, int pos) {
   // ---- classifier: one big Q4 matmul producing 32K logits ----
   matmul_q4(s->logits, s->x, T->wcls_q4, dim, p->vocab_size);
 
-  yield();
+  taskYIELD();
   return s->logits;
 }
 
@@ -391,7 +391,7 @@ static float* forward_gptneo(Transformer* T, int token, int pos) {
   // ---- classifier: tied to the (pruned) token embedding ----
   matmul_q4(s->logits, s->x, T->wcls_q4, dim, p->vocab_size);
 
-  yield();
+  taskYIELD();
   return s->logits;
 }
 

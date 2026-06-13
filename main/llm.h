@@ -8,7 +8,6 @@
 //   - Tokenizer is walked from flash; no 256 KB index in heap.
 //   - Sampler: argmax + multinomial only (no top-p / probindex).
 #pragma once
-#include <Arduino.h>
 #include <stdint.h>
 #include <stddef.h>
 

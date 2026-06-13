@@ -1,12 +1,12 @@
 // Host-side test driver for llm.cpp. Loads the converter's .bin files and runs
-// encode → forward → sample exactly like the sketch does, printing to stdout.
+// encode → forward → sample exactly like the firmware does, printing to stdout.
 //
 // Build (from the sketch root):
-//   clang++ -std=c++17 -O2 -I tools/host tools/host/host_test.cpp llm.cpp -o /tmp/llm_host
+//   clang++ -std=c++17 -O2 -I tools/host tools/host/host_test.cpp main/llm.cpp -o /tmp/llm_host
 // Run:
 //   /tmp/llm_host embed/model_neo_q4.bin embed/tok_neo.bin "Summary: ...\nStory:" [opts]
 // Options: --max N   --temp F   --kv N   --top10 (print top-10 logits per step)
-#include "../../llm.h"
+#include "../../main/llm.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
