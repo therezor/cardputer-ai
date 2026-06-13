@@ -45,7 +45,7 @@ enum ChatMode { M_CHAT, M_STORY, M_RAW };
 
 struct Settings {
   float temp      = DEFAULT_TEMP;     // 0.0 = greedy (argmax)
-  int   max_reply = 44;               // tokens per reply; rest is prompt budget
+  int   max_reply = 44;               // tokens per reply; -1 = no limit (runs to KV_SEQ_LEN or EOS)
   int   mode      = M_CHAT;
 };
 static Settings settings;
@@ -65,7 +65,7 @@ static void drawSettings() {
   String values[SETT_N];
   values[0] = modeName(settings.mode);
   values[1] = settings.temp < 0.05f ? String("0.0 greedy") : String(settings.temp, 1);
-  values[2] = String(settings.max_reply);
+  values[2] = settings.max_reply < 0 ? String("unlimited") : String(settings.max_reply);
   values[3] = "reroll with , /";
   ui.showSettings("Settings", names, values, SETT_N, sett_sel);
 }
@@ -81,7 +81,9 @@ static void adjustSetting(int dir) {
       sampler.temperature = settings.temp;        // takes effect immediately
       break;
     case 2:
-      settings.max_reply = constrain(settings.max_reply + dir, 4, KV_SEQ_LEN - 8);
+      if (dir < 0 && settings.max_reply <= 4)       settings.max_reply = -1;
+      else if (dir > 0 && settings.max_reply < 0)   settings.max_reply = 4;
+      else settings.max_reply = constrain(settings.max_reply + dir, 4, KV_SEQ_LEN - 8);
       break;
     case 3:
       llm_build_sampler(&sampler, transformer.config.vocab_size,
@@ -171,8 +173,9 @@ static void beginGeneration(const String& user_text) {
   int mode = neo ? settings.mode : M_RAW;
 
   // Leave room for the reply: everything the prompt doesn't use, the model
-  // can spend on talking back.
-  int budget = KV_SEQ_LEN - settings.max_reply - 1;
+  // can spend on talking back. When max_reply is -1 (unlimited), treat as 0
+  // so the full remaining context is available for the prompt.
+  int budget = KV_SEQ_LEN - (settings.max_reply >= 0 ? settings.max_reply : 0) - 1;
   if (budget < 8) budget = 8;
 
   if (gen.prompt_tokens) { free(gen.prompt_tokens); gen.prompt_tokens = nullptr; }
@@ -258,7 +261,7 @@ static void finishReply() {
 }
 
 static void stepGeneration() {
-  if (gen.pos >= KV_SEQ_LEN - 1 || gen.tokens_out >= settings.max_reply) {
+  if (gen.pos >= KV_SEQ_LEN - 1 || (settings.max_reply >= 0 && gen.tokens_out >= settings.max_reply)) {
     finishReply();
     return;
   }
