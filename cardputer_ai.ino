@@ -267,8 +267,9 @@ static void finishReply() {
     historyPush(gen.user_text, gen.bot_text);
   ui.endBotReply(gen.tokens_out, millis() - gen.t_start_ms);
   if (was_wrapped) {
+    int total_tok = gen.tokens_out;
     historyClear();
-    ui.statusf("context wrapped - auto /new  [tab] settings");
+    ui.statusf("context wrapped - %d tokens - new convo", total_tok);
   }
 }
 
