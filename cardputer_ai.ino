@@ -137,6 +137,7 @@ struct GenState {
   String user_text;        // chat mode: pending exchange for the history
   String bot_text;
   bool pending_nl = false; // hold back a lone "\n" until we know what follows
+  bool wrapped    = false; // true if unsafe mode has wrapped pos (context corrupted)
 } gen;
 
 static void initModel() {
@@ -255,22 +256,30 @@ static void beginGeneration(const String& user_text) {
   gen.tokens_out  = 0;
   gen.bot_text    = "";
   gen.pending_nl  = false;
+  gen.wrapped     = false;
   ui.beginBotReply();
 }
 
 static void finishReply() {
   gen.active = false;
+  bool was_wrapped = gen.wrapped;
   if (settings.mode == M_CHAT && tokenizer.style == ARCH_GPTNEO && gen.bot_text.length())
     historyPush(gen.user_text, gen.bot_text);
   ui.endBotReply(gen.tokens_out, millis() - gen.t_start_ms);
+  if (was_wrapped) {
+    historyClear();
+    ui.statusf("context wrapped - auto /new  [tab] settings");
+  }
 }
 
 static void stepGeneration() {
   if (gen.pos >= KV_SEQ_LEN - 1) {
-    if (settings.max_reply == -2)
-      gen.pos = gen.n_prompt;  // wrap: overwrite output KV region, keep going
-    else
-      { finishReply(); return; }
+    if (settings.max_reply == -2) {
+      gen.pos     = gen.n_prompt;  // wrap: overwrite output KV region, keep going
+      gen.wrapped = true;
+    } else {
+      finishReply(); return;
+    }
   }
   if (settings.max_reply >= 0 && gen.tokens_out >= settings.max_reply) {
     finishReply();
@@ -351,7 +360,19 @@ void loop() {
   }
   if (state != ST_CHAT) return;
 
-  if (gen.active) { ui.tickGenerating(gen.tokens_out); stepGeneration(); return; }
+  if (gen.active) {
+    ui.tickGenerating(gen.tokens_out);
+    // Check for backtick interrupt
+    if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
+      auto st = M5Cardputer.Keyboard.keysState();
+      for (char c : st.word) {
+        if (c == '`') { finishReply(); return; }
+      }
+    }
+    stepGeneration();
+    return;
+  }
+
   if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
     auto st = M5Cardputer.Keyboard.keysState();
     if (st.tab) {                      // open settings (only when idle)
