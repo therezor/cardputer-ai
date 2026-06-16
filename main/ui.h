@@ -44,14 +44,17 @@ private:
   static constexpr int VISIBLE  = (INPUT_Y - CHAT_Y0) / LINE_H;  // 6 lines
   static constexpr int MAX_LINES = 120;            // scrollback depth (ring)
 
-  static constexpr uint16_t C_BG     = 0x0000;
-  static constexpr uint16_t C_BAR    = 0x10A2;     // bar background
-  static constexpr uint16_t C_DIV    = 0x4A49;     // divider lines
-  static constexpr uint16_t C_USER   = 0x07E0;     // green prompt marker
-  static constexpr uint16_t C_TEXT   = 0xFFFF;     // user text
-  static constexpr uint16_t C_BOT    = 0x07FF;     // bot text (cyan)
-  static constexpr uint16_t C_STATUS = 0xFFE0;     // yellow status text
-  static constexpr uint16_t C_DIM    = 0xC618;     // grey
+  // "Vaporwave" theme — deep indigo background with the classic hot-pink +
+  // cyan + purple triad. High bg/fg contrast. (RGB565)
+  static constexpr uint16_t C_BG     = 0x1065;     // deep indigo-purple
+  static constexpr uint16_t C_BAR    = 0x20CA;     // indigo bar
+  static constexpr uint16_t C_DIV    = 0x7A74;     // purple divider
+  static constexpr uint16_t C_USER   = 0x07FF;     // cyan prompt marker
+  static constexpr uint16_t C_TEXT   = 0xFFFF;     // white text
+  static constexpr uint16_t C_BOT    = 0xFB5A;     // hot-pink bot text
+  static constexpr uint16_t C_STATUS = 0xC3BD;     // pastel-purple status text
+  static constexpr uint16_t C_DIM    = 0x6B76;     // muted lavender-blue
+  static constexpr uint16_t C_SEL    = 0x594F;     // magenta selection highlight
 
   std::string input_;
   int      chat_y_   = CHAT_Y0;

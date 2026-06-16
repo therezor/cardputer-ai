@@ -346,12 +346,12 @@ static void setup() {
   Keyboard.begin();    // picks IOMatrix or TCA8418 reader from M5.getBoard()
   ui.begin();
 
-  ui.status("TinyStories booting...");
+  ui.status("BRAINROT.EXE booting...");
   initModel();
 
   ui.ready();
   ui.statusf("%s  T=%.1f  /new resets  [tab] settings",
-             transformer.config.arch == ARCH_GPTNEO ? "TinyChat-3M" : "TinyLLama-v0",
+             transformer.config.arch == ARCH_GPTNEO ? "BRAINROT.EXE" : "TinyLLama-v0",
              settings.temp);
   state = ST_CHAT;
 }
