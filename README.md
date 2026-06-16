@@ -185,6 +185,15 @@ ships 256 position embeddings, so RAM is the binding constraint, not flash.
 - Chat quality is bounded by 3M params and the 47%-yield SODA filter; the
   next quality lever is more/better dialogue data, not more epochs.
 
+## Changelog
+
+- **v1.1**
+  - Press the backtick (`` ` ``) key to stop a reply while it's being typed out.
+  - Two new reply-length options below the normal range: **unlimited** (keeps
+    going until the model decides to stop) and **unsafe** (lets longer replies
+    keep going by reusing memory, clearing the chat when it runs out).
+- **v1.0** — initial release.
+
 ## License
 
 Code: MIT (see LICENSE). The embedded model derives from
