@@ -1,0 +1,6 @@
+{
+  "repo": "shvn22k/brainrot-dataset",
+  "train_samples": 5663,
+  "val_samples": 503,
+  "train_chars": 806001
+}

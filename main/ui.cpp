@@ -33,7 +33,7 @@ void ChatUI::begin() {
   cur_        = "";
   cur_color_  = 0;
   offset_     = 0;
-  drawStatusBar("Cardputer AI", C_DIM);
+  drawStatusBar("BRAINROT.EXE", C_DIM);
   drawInputBox();
 }
 
@@ -176,7 +176,7 @@ void ChatUI::scrollChat(int lines) {
   offset_ = no;
   redrawChat();
   if (offset_ > 0) statusf("history -%d    fn+. = back to latest", offset_);
-  else             drawStatusBar("Cardputer AI", C_DIM);
+  else             drawStatusBar("BRAINROT.EXE", C_DIM);
 }
 
 void ChatUI::newline() {
@@ -247,13 +247,13 @@ void ChatUI::ready() {
   cur_        = "";
   cur_color_  = 0;
   offset_     = 0;
-  drawStatusBar("Cardputer AI", C_DIM);
+  drawStatusBar("BRAINROT.EXE", C_DIM);
   drawInputBox();
 }
 
 void ChatUI::repaint() {
   D().fillScreen(C_BG);
-  drawStatusBar("Cardputer AI", C_DIM);
+  drawStatusBar("BRAINROT.EXE", C_DIM);
   redrawChat();
   drawInputBox();
 }
@@ -275,7 +275,7 @@ void ChatUI::showSettings(const char* title, const std::string* names, const std
 
   for (int i = 0; i < n; i++) {
     int y = header + 4 + i * row_h;
-    uint16_t bg = (i == selected) ? 0x2A4A : C_BG;
+    uint16_t bg = (i == selected) ? C_SEL : C_BG;
     D().fillRect(0, y, W, row_h, bg);
     D().setTextColor(i == selected ? C_TEXT : C_DIM, bg);
     D().setCursor(6, y + 1);
@@ -352,7 +352,7 @@ void ChatUI::showProgress(const char* label, size_t done, size_t total) {
   D().print(label);
   int pct = total ? (int)(done * 100 / total) : 0;
   D().drawRect(4, H/2 + 2, W - 8, 8, C_TEXT);
-  D().fillRect(5, H/2 + 3, (W - 10) * pct / 100, 6, 0x07E0);
+  D().fillRect(5, H/2 + 3, (W - 10) * pct / 100, 6, C_USER);
   D().setCursor(W - 36, H/2 - 12);
   char b[16]; snprintf(b, sizeof(b), "%d%%", pct);
   D().print(b);
