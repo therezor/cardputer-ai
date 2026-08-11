@@ -237,6 +237,13 @@ static void mm_worker(void*) {
   }
 }
 
+// The browser build (tools/web) is single-threaded: WASM pthreads need
+// SharedArrayBuffer, which needs cross-origin isolation headers a static page
+// cannot set. Both row ranges run on the one thread — identical arithmetic,
+// just without the second core.
+#if defined(__EMSCRIPTEN__)
+static void ensure_worker() {}
+#else
 static void ensure_worker() {
   if (mm_task_handle) return;
   mm_go   = xSemaphoreCreateBinary();
@@ -246,6 +253,7 @@ static void ensure_worker() {
   xTaskCreatePinnedToCore(mm_worker, "mm_w", 4096, NULL, 5,
                           &mm_task_handle, other_core);
 }
+#endif
 
 // v3 activation-quantization scratch, sized at init for max(dim, hidden_dim).
 // One model per process; both cores read these after the pre-dispatch quant.
@@ -264,6 +272,10 @@ static void matmul_q4(float* xout, const float* x, const uint8_t* w, int n, int 
     quantize_row_q8(x, g_xq, g_xs, n);   // once per call, before dispatch
     xq = g_xq; xs = g_xs;
   }
+#if defined(__EMSCRIPTEN__)
+  MatmulArgs all = { xout, x, xq, xs, w, n, row_bytes, 0, d };
+  matmul_rows(&all);
+#else
   int split = d / 2;
 
   mm_args.xout = xout; mm_args.x = x; mm_args.xq = xq; mm_args.xs = xs;
@@ -276,6 +288,7 @@ static void matmul_q4(float* xout, const float* x, const uint8_t* w, int n, int 
 
   xSemaphoreTake(mm_done, portMAX_DELAY);
   taskYIELD();
+#endif
 }
 
 // ============================================================================

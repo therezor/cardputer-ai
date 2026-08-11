@@ -1,0 +1,463 @@
+<title>TinyTalk UA — найменший український чатбот</title>
+<style>
+  /* Палітра з самого пристрою: помаранчевий корпус Cardputer на холодному
+     сланцевому тлі, фосфорна бірюза для показників. Світла тема — базова;
+     темна перевизначає лише токени. */
+  :root {
+    --ground:   #E9EBEE;
+    --panel:    #FFFFFF;
+    --panel-2:  #F3F5F7;
+    --ink:      #14171C;
+    --ink-soft: #4A515C;
+    --ink-mute: #79818E;
+    --rule:     #D3D8DE;
+    --accent:   #D2540B;
+    --accent-in:#FFFFFF;
+    --live:     #0E6E68;
+    --warn:     #8A5A00;
+    --screen:   #14171C;
+    --screen-ink:#E7EAEE;
+    --user:     #37C871;
+    --bot:      #55D6E0;
+    --shadow:   0 1px 2px rgba(20,23,28,.06), 0 8px 24px rgba(20,23,28,.07);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:#0D0F13; --panel:#161A20; --panel-2:#1D222A; --ink:#E7EAEE;
+      --ink-soft:#AFB7C2; --ink-mute:#7B838F; --rule:#2A3038; --accent:#FF7A33;
+      --accent-in:#1A1206; --live:#4ECDC4; --warn:#E0A94A; --screen:#05070A;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.45);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:#0D0F13; --panel:#161A20; --panel-2:#1D222A; --ink:#E7EAEE;
+    --ink-soft:#AFB7C2; --ink-mute:#7B838F; --rule:#2A3038; --accent:#FF7A33;
+    --accent-in:#1A1206; --live:#4ECDC4; --warn:#E0A94A; --screen:#05070A;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.45);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 32px 20px 72px; }
+
+  header { padding-bottom: 18px; border-bottom: 2px solid var(--ink); }
+  h1 { margin: 0; font-size: clamp(28px, 5vw, 46px); letter-spacing: -.025em;
+       font-weight: 700; text-wrap: balance; line-height: 1.08; }
+  .sub { color: var(--ink-soft); max-width: 60ch; margin: 12px 0 0; font-size: 16px; }
+  .eyebrow { font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+             color: var(--accent); font-weight: 700; margin-bottom: 8px; }
+
+
+  .specs { display: flex; flex-wrap: wrap; gap: 0; margin: 18px 0 0; padding: 0;
+           list-style: none; border: 1px solid var(--rule); border-radius: 10px;
+           overflow: hidden; background: var(--panel); box-shadow: var(--shadow); }
+  .specs li { flex: 1 1 118px; padding: 12px 16px; border-right: 1px solid var(--rule); }
+  .specs li:last-child { border-right: 0; }
+  .specs .k { font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+              color: var(--ink-mute); }
+  .specs .v { font-size: 19px; font-weight: 650; letter-spacing: -.01em;
+              font-variant-numeric: tabular-nums; margin-top: 3px; }
+
+  .bench { display: grid; grid-template-columns: minmax(0,1.35fr) minmax(0,1fr);
+           gap: 22px; margin-top: 24px; align-items: start; }
+  @media (max-width: 860px) { .bench { grid-template-columns: 1fr; } }
+
+  .card { background: var(--panel); border: 1px solid var(--rule); border-radius: 12px;
+          box-shadow: var(--shadow); overflow: hidden; }
+  .card h2 { margin: 0; padding: 13px 16px; font-size: 12px; letter-spacing: .11em;
+             text-transform: uppercase; color: var(--ink-mute);
+             border-bottom: 1px solid var(--rule); font-weight: 700; }
+  .card .body { padding: 16px; }
+
+  #screen { background: var(--screen); color: var(--screen-ink); padding: 14px 16px;
+            min-height: 330px; max-height: 46vh; overflow-y: auto;
+            font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+            font-size: 13.5px; line-height: 1.5; }
+  .turn { margin: 0 0 10px; white-space: pre-wrap; word-wrap: break-word; }
+  .turn.u { color: var(--user); }
+  .turn.b { color: var(--bot); }
+  .turn .tag { opacity: .55; }
+  .turn.sys { color: #8C96A4; font-style: italic; }
+  .caret::after { content: "▋"; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .caret::after { animation: none; } }
+
+  form.ask { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--rule);
+             background: var(--panel-2); }
+  input[type=text] { flex: 1; min-width: 0; padding: 10px 12px; border-radius: 8px;
+                     border: 1px solid var(--rule); background: var(--panel);
+                     color: var(--ink); font-size: 15px;
+                     font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  input[type=text]:focus-visible, button:focus-visible { outline: 2px solid var(--accent);
+                     outline-offset: 2px; }
+  button { border: 0; border-radius: 8px; padding: 10px 16px; font-weight: 650;
+           font-size: 14px; background: var(--accent); color: var(--accent-in);
+           cursor: pointer; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.ghost { background: transparent; color: var(--ink-soft);
+                 border: 1px solid var(--rule); font-weight: 550; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; }
+  .chip { border: 1px solid var(--rule); background: var(--panel-2); color: var(--ink-soft);
+          border-radius: 999px; padding: 5px 11px; font-size: 12.5px; cursor: pointer;
+          font-family: ui-monospace, Menlo, monospace; }
+  .chip:hover { border-color: var(--accent); color: var(--accent); }
+
+  .ctl { display: grid; grid-template-columns: 92px 1fr 46px; gap: 9px 12px;
+         align-items: center; }
+  .ctl label { font-size: 12.5px; color: var(--ink-soft); }
+  .ctl output { font-size: 12.5px; text-align: right;
+                font-variant-numeric: tabular-nums;
+                font-family: ui-monospace, Menlo, monospace; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+
+  .kv { display: grid; grid-template-columns: 1fr auto; gap: 5px 14px; font-size: 13.5px;
+        margin: 0; }
+  .kv dt { color: var(--ink-soft); }
+  .kv dd { margin: 0; font-variant-numeric: tabular-nums; text-align: right;
+           font-family: ui-monospace, Menlo, monospace; }
+  .kv dd.good { color: var(--live); font-weight: 650; }
+
+  .note { font-size: 13px; color: var(--ink-soft); }
+  .note strong { color: var(--ink); }
+  .warnbox { border-left: 3px solid var(--warn); padding: 2px 0 2px 12px;
+             font-size: 13px; color: var(--ink-soft); }
+
+  .status { display: flex; align-items: center; gap: 8px; font-size: 12.5px;
+            color: var(--ink-mute); padding: 10px 16px; border-top: 1px solid var(--rule);
+            font-family: ui-monospace, Menlo, monospace; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-mute); flex: none; }
+  .dot.on { background: var(--live); }
+  .dot.busy { background: var(--accent); }
+
+  footer { margin-top: 32px; padding-top: 18px; border-top: 1px solid var(--rule);
+           color: var(--ink-mute); font-size: 12.5px; }
+  a { color: var(--accent); }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Потужно · 9 960 000 параметрів</div>
+    <h1>Найменший український чатбот у світі</h1>
+    <p class="sub">5,6 МБ. 700 млн українських токенів. Працює на
+      мікроконтролері ESP32 за $10 — без інтернету й без хмари.
+      Або де завгодно, наприклад у вашому браузері)</p>
+  </header>
+
+  <ul class="specs">
+    <li><div class="k">Параметрів</div><div class="v">9,96 млн</div></li>
+    <li><div class="k">Вага</div><div class="v">5,6 МБ</div></li>
+    <li><div class="k">Словник</div><div class="v">14 000</div></li>
+    <li><div class="k">Контекст</div><div class="v">72 токени</div></li>
+    <li><div class="k">Токенів навчання</div><div class="v">700 млн</div></li>
+  </ul>
+
+  <div class="bench">
+    <section class="card">
+      <h2>Розмова</h2>
+      <div id="screen" aria-live="polite" aria-label="Історія розмови">
+        <p class="turn sys" id="boot">Завантаження моделі…</p>
+      </div>
+      <form class="ask" id="ask">
+        <input type="text" id="msg" autocomplete="off" spellcheck="false"
+               placeholder="Напишіть щось українською…" disabled>
+        <button id="send" type="submit" disabled>Надіслати</button>
+        <button id="reset" type="button" class="ghost">Нова</button>
+      </form>
+      <div class="status">
+        <span class="dot" id="dot"></span><span id="stat">завантаження</span>
+      </div>
+    </section>
+
+    <div style="display:grid; gap:22px">
+      <section class="card">
+        <h2>Спробуйте</h2>
+        <div class="body" style="padding-top:13px; display:grid; gap:12px">
+          <div class="chips" id="chips"></div>
+          <div class="note">Без кирилиці? <span class="mono">pryvit</span> → привіт,
+            <span class="mono">Slava Ukraini</span> → Слава Україні.</div>
+          <label style="display:flex;gap:8px;align-items:center;font-size:13px">
+            <input type="checkbox" id="translit" checked> транслітерація
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Налаштування</h2>
+        <div class="body">
+          <div class="ctl">
+            <label for="temp">температура</label>
+            <input type="range" id="temp" min="0" max="1.2" step="0.05" value="0.8">
+            <output id="tempv">0.80</output>
+            <label for="topp">top-p</label>
+            <input type="range" id="topp" min="0.5" max="1" step="0.01" value="0.9">
+            <output id="toppv">0.90</output>
+            <label for="maxn">макс. токенів</label>
+            <input type="range" id="maxn" min="8" max="64" step="1" value="32">
+            <output id="maxnv">32</output>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Потужність</h2>
+        <div class="body">
+          <dl class="kv">
+            <dt>Параметрів</dt><dd>0,00996 млрд</dd>
+            <dt>Серверів</dt><dd>0</dd>
+            <dt>Байтів у хмару</dt><dd>0</dd>
+            <dt>Потужно?</dt><dd class="good">Потужно</dd>
+          </dl>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Залізо</h2>
+        <div class="body">
+          <dl class="kv">
+            <dt>Чіп</dt><dd>ESP32-S3 · 240 МГц</dd>
+            <dt>Оперативна пам'ять</dt><dd>512 КБ</dd>
+            <dt>Флеш</dt><dd>8 МБ</dd>
+            <dt>З них модель</dt><dd class="good">5,6 МБ</dd>
+            <dt>Швидкість</dt><dd>~5 ток/с</dd>
+          </dl>
+          <p class="note" style="margin:12px 0 0">Два ядра Xtensa LX7, без PSRAM.
+            Ваги лежать просто у флеші й читаються без копіювання — інакше
+            модель не влізла б у 512 КБ оперативної.</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Виміряна якість</h2>
+        <div class="body">
+          <dl class="kv">
+            <dt>Вивчені факти</dt><dd class="good">8 / 8</dd>
+            <dt>Чесне «не знаю»</dt><dd class="good">8 / 8</dd>
+            <dt>Без зайвих відмов</dt><dd class="good">8 / 8</dd>
+            <dt>Справжні українські словоформи</dt><dd class="good">99,5 %</dd>
+            <dt>Узгодження прикметник–іменник</dt><dd class="good">90,6 %</dd>
+          </dl>
+          <p class="note" style="margin:12px 0 0">Перевірено за
+            <span class="mono">VESUM</span> — еталонним морфологічним словником
+            української (3,9 млн словоформ).</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Чого не вміє</h2>
+        <div class="body">
+          <div class="warnbox">
+            Пам'ятає <strong>72 токени</strong>. Знає лише те, чого навчили —
+            решту чесно каже <em>не знаю</em>. Кожен одинадцятий прикметник ще бере
+            не те закінчення.
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <footer>
+    Двигун прошивки <span class="mono">llm.cpp</span> у WebAssembly — ті самі ваги Q4.
+    Усе працює локально: жоден символ не залишає ваш пристрій.
+  </footer>
+</div>
+
+__ENGINE__
+<script>
+(() => {
+  "use strict";
+  // Заповнює tools/web/make_page.py. Для сайту — fetch() окремих файлів;
+  // для артефакту на claude.ai — base64 просто тут, бо CSP забороняє
+  // будь-який зовнішній запит.
+  const LOAD_ASSETS = __ASSETS__;
+  const KV = 72;
+
+  const $ = id => document.getElementById(id);
+  const screenEl = $("screen"), dot = $("dot"), stat = $("stat");
+  let M = null, history = [], busy = false;
+
+  function b64ToBytes(b64) {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  // Завантаження з прогресом: 5,6 МБ на повільному з'єднанні — це помітно,
+  // і мовчазний екран виглядає як зависання. Якщо сервер не віддав
+  // Content-Length (наприклад, chunked), показуємо просто мегабайти.
+  async function fetchBytes(url, onProgress) {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
+    const total = +r.headers.get("content-length") || 0;
+    if (!r.body) return new Uint8Array(await r.arrayBuffer());
+    const reader = r.body.getReader();
+    const chunks = [];
+    let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value); got += value.length;
+      onProgress(got, total);
+    }
+    const out = new Uint8Array(got);
+    let at = 0;
+    for (const c of chunks) { out.set(c, at); at += c.length; }
+    return out;
+  }
+
+  function say(cls, tag, text) {
+    const p = document.createElement("p");
+    p.className = "turn " + cls;
+    if (tag) { const s = document.createElement("span"); s.className = "tag"; s.textContent = tag; p.appendChild(s); }
+    p.appendChild(document.createTextNode(text));
+    screenEl.appendChild(p);
+    screenEl.scrollTop = screenEl.scrollHeight;
+    return p;
+  }
+
+  // --- транслітерація, портована з main/translit.cpp ------------------------
+  const RULES = [["shch","щ"],["zh","ж"],["ch","ч"],["sh","ш"],["kh","х"],["gg","ґ"],
+    ["ya","я"],["yu","ю"],["ye","є"],["yi","ї"],["yo","йо"],
+    ["ja","я"],["ju","ю"],["je","є"],["ji","ї"],
+    ["a","а"],["b","б"],["c","ц"],["d","д"],["e","е"],["f","ф"],["g","г"],["h","г"],
+    ["i","і"],["j","й"],["k","к"],["l","л"],["m","м"],["n","н"],["o","о"],["p","п"],
+    ["q","ь"],["r","р"],["s","с"],["t","т"],["u","у"],["v","в"],["w","ш"],["x","х"],
+    ["y","и"],["z","з"]];
+  const VOW = "aeouy";
+  const upFirst = s => s.charAt(0).toUpperCase() + s.slice(1);
+  function translit(src) {
+    let out = "", i = 0;
+    while (i < src.length) {
+      const c = src[i], lc = c.toLowerCase();
+      if (lc === "y" && i + 1 < src.length) {
+        const n1 = src[i+1].toLowerCase();
+        const after = src[i+2];
+        const atEnd = after === undefined || !/[a-z]/i.test(after);
+        if ((n1 === "i" || n1 === "y") && atEnd) {
+          out += (c === c.toUpperCase() && c !== lc) ? "Ий" : "ий"; i += 2; continue;
+        }
+      }
+      if (lc === "i" && i > 0 && VOW.includes(src[i-1].toLowerCase())) {
+        out += (c === "I") ? "Ї" : "ї"; i++; continue;
+      }
+      let hit = false;
+      for (const [lat, cyr] of RULES) {
+        if (src.substr(i, lat.length).toLowerCase() === lat) {
+          out += (c === c.toUpperCase() && c !== lc) ? upFirst(cyr) : cyr;
+          i += lat.length; hit = true; break;
+        }
+      }
+      if (!hit) { out += c; i++; }
+    }
+    return out;
+  }
+
+  async function boot() {
+    try {
+      const { model, tok } = await LOAD_ASSETS((got, total) => {
+        const mb = (got / 1048576).toFixed(1);
+        $("boot").textContent = total
+          ? `Завантаження моделі… ${Math.round(100 * got / total)}%`
+          : `Завантаження моделі… ${mb} МБ`;
+      });
+      M = await createLLM();
+      // CRDP v3 тримає ваги Q4 у 16-байтово вирівняних площинах, і завантажувач
+      // відхиляє невирівняний вказівник; malloc сам по собі 16 не гарантує.
+      const alloc16 = b => { const raw = M._malloc(b.length + 16);
+                             const p = (raw + 15) & ~15; M.HEAPU8.set(b, p); return p; };
+      const ok = M.ccall("chat_init", "number",
+        ["number","number","number","number","number"],
+        [alloc16(model), model.length, alloc16(tok), tok.length, KV]);
+      if (!ok) throw new Error("не вдалося ініціалізувати модель");
+      $("boot").remove();
+      say("sys", "", "Модель готова. Напишіть щось українською.");
+      dot.classList.add("on");
+      const info = JSON.parse(M.ccall("chat_info", "string", [], []));
+      stat.textContent = `готово · dim ${info.dim} · ${info.layers} шарів · словник ${info.vocab}`;
+      $("msg").disabled = false; $("send").disabled = false; $("msg").focus();
+    } catch (e) {
+      $("boot").textContent = "Не вдалося завантажити модель: " + e.message;
+      stat.textContent = "помилка — спробуйте перезавантажити сторінку";
+    }
+  }
+
+  function buildPrompt(userText) {
+    let p = "";
+    for (const [u, b] of history) p += `User: ${u}\nBot: ${b}<|eos|>\n`;
+    return p + `User: ${userText}\nBot:`;
+  }
+
+  function ask(text) {
+    if (busy || !M || !text.trim()) return;
+    busy = true;
+    $("send").disabled = true;
+    dot.classList.remove("on"); dot.classList.add("busy");
+    stat.textContent = "думає…";
+    say("u", "> ", text);
+    const pending = say("b", "", "");
+    pending.classList.add("caret");
+
+    setTimeout(() => {
+      const t0 = performance.now();
+      let reply = "";
+      try {
+        reply = M.ccall("chat_reply", "string",
+          ["string","number","number","number","number"],
+          [buildPrompt(text), +$("maxn").value, +$("temp").value, +$("topp").value,
+           (Math.random() * 4294967295) >>> 0]);
+      } catch (e) { reply = ""; }
+      const ms = Math.round(performance.now() - t0);
+      reply = reply.trim() || "…";
+      pending.classList.remove("caret");
+      pending.textContent = reply;
+      history.push([text, reply]);
+      if (history.length > 3) history.shift();
+      busy = false;
+      $("send").disabled = false;
+      dot.classList.remove("busy"); dot.classList.add("on");
+      stat.textContent = `${ms} мс · ${history.length} репл. у пам'яті`;
+      $("msg").focus();
+    }, 16);
+  }
+
+  const PRESETS = ["Слава Україні!", "привіт", "як справи", "Я люблю котів.",
+                   "яка столиця україни", "що каже кіт", "Мені сумно.",
+                   "скільки днів у тижні", "Розкажи щось цікаве.", "Що таке блокчейн?"];
+  const chips = $("chips");
+  for (const p of PRESETS) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "chip"; b.textContent = p;
+    b.addEventListener("click", () => ask(p));
+    chips.appendChild(b);
+  }
+
+  $("ask").addEventListener("submit", e => {
+    e.preventDefault();
+    const raw = $("msg").value;
+    if (!raw.trim()) return;
+    $("msg").value = "";
+    ask($("translit").checked ? translit(raw) : raw);
+  });
+  $("reset").addEventListener("click", () => {
+    history = [];
+    screenEl.innerHTML = "";
+    say("sys", "", "Нова розмова.");
+    stat.textContent = "пам'ять очищено";
+    $("msg").focus();
+  });
+  for (const [id, out, fmt] of [["temp","tempv",v=>(+v).toFixed(2)],
+                                ["topp","toppv",v=>(+v).toFixed(2)],
+                                ["maxn","maxnv",v=>v]]) {
+    const el = $(id), o = $(out);
+    el.addEventListener("input", () => { o.textContent = fmt(el.value); });
+  }
+
+  boot();
+})();
+</script>
