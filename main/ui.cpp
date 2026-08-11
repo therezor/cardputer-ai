@@ -1,5 +1,7 @@
 #include "ui.h"
 #include "port.h"
+#include "translit.h"
+#include "ukr_font.h"
 #include <M5Unified.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -7,8 +9,37 @@
 
 static auto& D() { return M5.Display; }
 
-void ChatUI::chatFont() { D().setFont(&fonts::Font2); D().setTextSize(1); }
+// Chat text is Ukrainian, so it needs a font with the full Cyrillic block —
+// m5gfx's bundled efont has the Russian letters but not Ґ Є І Ї ґ є і ї.
+// 16 px tall, matching LINE_H. m5gfx decodes UTF-8 by default, so print() and
+// textWidth() take the same UTF-8 strings the model emits.
+static const lgfx::U8g2font ukrFont(u8g2_font_unifont_t_cyrillic);
+
+void ChatUI::chatFont() { D().setFont(&ukrFont); D().setTextSize(1); }
 void ChatUI::uiFont()   { D().setFont(&fonts::Font0); D().setTextSize(1); }
+
+// ---------- UTF-8 helpers ----------
+// Cyrillic is two bytes per character in UTF-8, so every place that used to
+// step or split by byte has to step by character instead; a split sequence
+// renders as garbage and corrupts what gets fed back to the tokenizer.
+
+static inline bool utf8IsCont(char c) { return ((uint8_t)c & 0xC0) == 0x80; }
+
+// Bytes in the sequence that starts with `lead`.
+static inline int utf8SeqLen(char lead) {
+  uint8_t b = (uint8_t)lead;
+  if (b < 0x80) return 1;
+  if ((b & 0xE0) == 0xC0) return 2;
+  if ((b & 0xF0) == 0xE0) return 3;
+  if ((b & 0xF8) == 0xF0) return 4;
+  return 1;                                  // stray continuation byte
+}
+
+// Largest index <= i that starts a character.
+static size_t utf8Floor(const char* s, size_t i) {
+  while (i > 0 && utf8IsCont(s[i])) i--;
+  return i;
+}
 
 uint16_t ChatUI::colorFor(uint8_t code) {
   switch (code) {
@@ -76,9 +107,11 @@ void ChatUI::drawInputBox() {
   D().fillRect(0, INPUT_Y, W, INPUT_H, C_BAR);
   D().drawFastHLine(0, INPUT_Y, W, C_DIV);
   chatFont();
-  D().setTextColor(C_USER, C_BAR);
+  // Prompt marker doubles as the input-mode indicator, so the current mode is
+  // always visible without opening settings.
+  D().setTextColor(translit_ ? C_USER : C_DIM, C_BAR);
   D().setCursor(4, INPUT_Y + 2);
-  D().print("> ");
+  D().print(translit_ ? "ua>" : "en>");
   int x0 = D().getCursorX();
 
   // Show the tail of the input if it is wider than the box, so the cursor
@@ -86,14 +119,17 @@ void ChatUI::drawInputBox() {
   const char* s = input_.c_str();
   int start = 0;
   const int avail = W - x0 - 12;             // room for the caret block
-  while (s[start] && D().textWidth(s + start) > avail) start++;
+  while (s[start] && D().textWidth(s + start) > avail)
+    start += utf8SeqLen(s[start]);           // step by character, not by byte
 
   D().setCursor(x0, INPUT_Y + 2);
   if (start > 0) {                           // clipped on the left
     D().setTextColor(C_DIM, C_BAR);
     D().print("<");
     D().setTextColor(C_TEXT, C_BAR);
-    D().print(s + start + 1);                // +1: make room for the '<'
+    // Drop one more character to make room for the '<' marker.
+    int skip = s[start] ? utf8SeqLen(s[start]) : 0;
+    D().print(s + start + skip);
   } else {
     D().setTextColor(C_TEXT, C_BAR);
     D().print(s);
@@ -211,20 +247,29 @@ void ChatUI::writeText(const char* s, uint16_t color) {
     if (*p == ' ') p++;
     else while (*p && *p != ' ' && *p != '\n') p++;
     int len = p - start;
-    if (len > (int)sizeof(buf) - 1) { len = sizeof(buf) - 1; p = start + len; }
+    if (len > (int)sizeof(buf) - 1) {
+      // Back the cut off to a character boundary — Cyrillic is two bytes per
+      // letter, so a blind cut at 47 bytes can land inside one.
+      len = (int)utf8Floor(start, sizeof(buf) - 1);
+      p = start + len;
+    }
     memcpy(buf, start, len); buf[len] = 0;
 
     int wpx = D().textWidth(buf);
     if (cursor_x_ + wpx > maxw) {
       if (MARGIN + wpx > maxw) {             // word longer than a whole line
-        for (int i = 0; i < len; i++) {
-          char t[2] = {buf[i], 0};
+        for (int i = 0; i < len; ) {
+          int cl = utf8SeqLen(buf[i]);
+          if (i + cl > len) cl = len - i;
+          char t[5];
+          memcpy(t, buf + i, cl); t[cl] = 0;
           int cw = D().textWidth(t);
           if (cursor_x_ + cw > maxw) newline();
           D().setCursor(cursor_x_, chat_y_);
           D().print(t);
           emit(t);
           cursor_x_ += cw;
+          i += cl;
         }
         continue;
       }
@@ -360,19 +405,40 @@ void ChatUI::showProgress(const char* label, size_t done, size_t total) {
 
 // ---------- Input ----------
 
+// Re-render input_ from the Latin keystrokes. Lines starting with '/' are
+// commands ("/new") and stay Latin — transliterating them would turn /new into
+// /неш and the command would never match.
+void ChatUI::refreshInput() {
+  bool raw = !translit_ || (!latin_.empty() && latin_[0] == '/');
+  input_ = raw ? latin_ : translitToCyrillic(latin_);
+}
+
+void ChatUI::toggleTranslit() {
+  translit_ = !translit_;
+  refreshInput();
+  drawInputBox();
+  statusf("%s    fn+u switches", translit_ ? "UA - typing Ukrainian"
+                                           : "EN - typing Latin");
+}
+
 void ChatUI::onChar(char c) {
   if (c < 32 || c > 126) return;
-  if (input_.length() > 200) return;
-  input_ += c;
+  if (latin_.length() > 200) return;
+  latin_ += c;
+  refreshInput();
   drawInputBox();
 }
 void ChatUI::onBackspace() {
-  if (!input_.length()) return;
-  input_.pop_back();
+  if (latin_.empty()) return;
+  latin_.pop_back();                  // latin_ is ASCII, so one byte is one key
+  refreshInput();
   drawInputBox();
 }
 std::string ChatUI::takeInput() {
-  std::string s = input_; input_ = ""; drawInputBox();
+  std::string s = input_;
+  latin_.clear();
+  input_.clear();
+  drawInputBox();
   return s;
 }
 

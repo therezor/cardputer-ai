@@ -4,6 +4,8 @@ idf_component_register(
         llm.cpp
         dot_q4_pie.S
         ui.cpp
+        translit.cpp
+        ukr_font.c
         model_data.cpp
         tok_data.cpp
         keyboard/Keyboard.cpp

@@ -34,8 +34,8 @@ private:
   static constexpr int H = 135;
   static constexpr int W = 240;
   static constexpr int MARGIN = 3;
-  // Chat + input use fonts::Font2 (proportional, 16 px tall) — fits ~36 chars
-  // per line vs 20 with the old 2x Font0, and word-wraps at spaces.
+  // Chat + input use the vendored Unifont Cyrillic face (16 px tall, see
+  // main/ukr_font.h) and word-wrap at spaces.
   static constexpr int LINE_H   = 16;
   static constexpr int STATUS_H = 12;              // top bar, Font0 size 1
   static constexpr int INPUT_H  = 20;
@@ -53,6 +53,10 @@ private:
   static constexpr uint16_t C_STATUS = 0xFFE0;     // yellow status text
   static constexpr uint16_t C_DIM    = 0xC618;     // grey
 
+  // The keys the user actually pressed (ASCII) and the Cyrillic rendering of
+  // them. latin_ is the source of truth: the whole buffer is re-transliterated
+  // on every keystroke so multi-letter sequences ("s" then "h" -> "ш") work.
+  std::string latin_;
   std::string input_;
   int      chat_y_   = CHAT_Y0;
   int      cursor_x_ = MARGIN;
@@ -76,6 +80,16 @@ private:
   static uint8_t  codeFor(uint16_t color);
   void drawStatusBar(const char* s, uint16_t color);
   void drawInputBox();
+  void refreshInput();               // latin_ -> input_ (transliterate)
+
+public:
+  // Latin keycaps can't reach Cyrillic, so keystrokes are transliterated by
+  // default. This toggles it off for typing Latin (names, URLs, English).
+  void toggleTranslit();
+  bool translitOn() const { return translit_; }
+
+private:
+  bool translit_ = true;
   void newline();
   void commitLine();
   void drawLine(const std::string& l, int y);

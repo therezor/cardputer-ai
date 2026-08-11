@@ -23,11 +23,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-DEFLECT_MARKERS = [
-    "don't know", "do not know", "not sure", "too hard", "too tricky",
-    "tricky for me", "little bot", "tiny bot", "small bot", "can't answer",
-    "cannot answer", "wish i knew", "too little to know", "big question",
-]
+DEFLECT_MARKERS = {
+    "en": [
+        "don't know", "do not know", "not sure", "too hard", "too tricky",
+        "tricky for me", "little bot", "tiny bot", "small bot", "can't answer",
+        "cannot answer", "wish i knew", "too little to know", "big question",
+    ],
+    # Ukrainian phrasings from tools/ukr_qa_facts.py DEFLECTIONS. Matched on the
+    # lowercased reply, and kept to stems so inflected forms still hit.
+    "ukr": [
+        "не знаю", "не знав", "не вивчив", "не впевнен", "не можу сказати",
+        "занадто складно", "дуже маленький бот", "маленький бот",
+        "тільки прості речі", "вибач",
+    ],
+}
 
 
 def build_host(out: Path):
@@ -61,9 +70,9 @@ def load_prompts(path: Path):
     return rows
 
 
-def deflects(reply):
+def deflects(reply, lang):
     r = reply.lower()
-    return any(m in r for m in DEFLECT_MARKERS)
+    return any(m in r for m in DEFLECT_MARKERS[lang])
 
 
 def main():
@@ -72,6 +81,8 @@ def main():
                     metavar="NAME=model.bin,tok.bin",
                     help="repeatable; each is run over the whole battery")
     ap.add_argument("--prompts", default=str(ROOT / "tools/eval_prompts.txt"))
+    ap.add_argument("--lang", choices=sorted(DEFLECT_MARKERS), default="en",
+                    help="which deflection vocabulary scores idk/chat")
     ap.add_argument("--host-bin", default="/tmp/llm_host_eval")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
@@ -105,12 +116,12 @@ def main():
                 scores[name]["fact"][1] += 1
                 verdict = "PASS" if ok else "FAIL"
             elif typ == "idk":
-                ok = deflects(greedy)
+                ok = deflects(greedy, args.lang)
                 scores[name]["idk"][0] += ok
                 scores[name]["idk"][1] += 1
                 verdict = "PASS" if ok else "FAIL"
             elif typ == "chat":
-                ok = not deflects(greedy)
+                ok = not deflects(greedy, args.lang)
                 scores[name]["chat"][0] += ok
                 scores[name]["chat"][1] += 1
                 verdict = "PASS" if ok else "OVER-REFUSAL"

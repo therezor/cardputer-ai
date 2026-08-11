@@ -512,6 +512,7 @@ static void loop() {
       for (char c : st.word) {
         if (c == ';') ui.scrollChat(+2);
         if (c == '.') ui.scrollChat(-2);
+        if (c == 'u') ui.toggleTranslit();   // Ukrainian <-> Latin input
       }
     } else {
       for (char c : st.word) ui.onChar(c);

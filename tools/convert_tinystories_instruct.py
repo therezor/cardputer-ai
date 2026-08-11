@@ -34,7 +34,7 @@ BLOCK_SIZE = 32
 
 TOK_MAGIC = 0x324B5443  # "CTK2" little-endian
 
-GPT2_EOS = 50256
+EOS_PIECE = "<|endoftext|>"
 
 MODELS = {
     "1M": "roneneldan/TinyStories-Instruct-1M",
@@ -122,7 +122,9 @@ def build_kept_vocab(snap: Path, valid_txt: Path, min_count: int, extra_corpus=(
     from tokenizers import ByteLevelBPETokenizer
 
     tok = ByteLevelBPETokenizer(str(snap / "vocab.json"), str(snap / "merges.txt"))
-    text = valid_txt.read_text()
+    # errors="replace": this text only drives token *counts* for vocab pruning,
+    # and a corpus slice truncated mid-character should not abort the convert.
+    text = valid_txt.read_text(errors="replace")
     for p in extra_corpus:
         # The raw BPE tokenizer has no special tokens; strip EOS literals so
         # they don't skew counts (EOS itself is always kept anyway).
@@ -137,24 +139,35 @@ def build_kept_vocab(snap: Path, valid_txt: Path, min_count: int, extra_corpus=(
     id2piece = {v: k for k, v in vocab.items()}
     u2b = {v: k for k, v in bytes_to_unicode().items()}
 
-    # merges.txt, rank order. In GPT-2 the resulting token id is 256 + rank,
-    # so id order == merge-rank order; the device exploits this (it always
-    # applies the adjacent pair with the lowest resulting id — exact BPE).
+    # merges.txt, rank order. The device always applies the adjacent pair whose
+    # merge result has the lowest id, so exact BPE requires only that id order
+    # == merge-rank order. GPT-2 satisfies that as id == 256 + rank; a freshly
+    # trained ByteLevelBPE satisfies it with a different offset (a leading
+    # special token shifts everything by one), so check monotonicity, not the
+    # literal offset. Pruning below preserves relative order, so this carries.
     merge_lines = (snap / "merges.txt").read_text().splitlines()
     if merge_lines and merge_lines[0].startswith("#"):
         merge_lines = merge_lines[1:]
     created_by = {}  # result_id -> (a_id, b_id)
+    prev_rid = -1
     for rank, line in enumerate(merge_lines):
         a, b = line.split(" ")
         rid = vocab[a + b]
-        assert rid == 256 + rank, f"id/rank mismatch at rank {rank}"
+        assert rid > prev_rid, (
+            f"id order != merge-rank order at rank {rank} ({rid} after "
+            f"{prev_rid}); the device's lowest-id-wins BPE would be wrong")
+        prev_rid = rid
         created_by[rid] = (vocab[a], vocab[b])
+
+    eos_old = vocab.get(EOS_PIECE)
+    if eos_old is None:
+        raise SystemExit(f"tokenizer has no {EOS_PIECE} token")
 
     keep = {t for t, c in counts.items() if c >= min_count}
     for piece, tid in vocab.items():
         if len(piece) == 1:
             keep.add(tid)
-    keep.add(GPT2_EOS)
+    keep.add(eos_old)
 
     # Transitive closure over merge ancestors.
     stack = list(keep)
@@ -170,8 +183,8 @@ def build_kept_vocab(snap: Path, valid_txt: Path, min_count: int, extra_corpus=(
     old2new = {old: new for new, old in enumerate(kept)}
     pieces = []
     for old in kept:
-        if old == GPT2_EOS:
-            pieces.append(b"<|endoftext|>")
+        if old == eos_old:
+            pieces.append(EOS_PIECE.encode())
         else:
             pieces.append(piece_to_bytes(id2piece[old], u2b))
 
@@ -179,7 +192,7 @@ def build_kept_vocab(snap: Path, valid_txt: Path, min_count: int, extra_corpus=(
                     for r, (a, b) in created_by.items() if r in keep)
     print(f"[+] pruned vocab: {len(kept):,} tokens, {len(merges):,} merges "
           f"(min_count={min_count})")
-    return old2new, pieces, merges, old2new[GPT2_EOS]
+    return old2new, pieces, merges, old2new[eos_old]
 
 
 def write_tokenizer_blob(out: Path, pieces: list, merges: list, eos_new: int):
@@ -333,6 +346,10 @@ def main():
     ap.add_argument("--max-vocab", type=int, default=15500,
                     help="hard cap on the pruned vocab (the logits buffer is "
                          "vocab*4 bytes of internal SRAM); fail if exceeded")
+    ap.add_argument("--valid-file", default=None,
+                    help="text file for vocab-pruning counts instead of the "
+                         "TinyStories validation split (use this for a "
+                         "non-English model)")
     ap.add_argument("--max-pos", type=int, default=256,
                     help="position embeddings to keep (= max context)")
     ap.add_argument("--out-dir", default=str(Path(__file__).resolve().parent.parent))
@@ -351,8 +368,15 @@ def main():
         print(f"[+] fetching {MODELS[args.model]}")
         snap = Path(snapshot_download(repo_id=MODELS[args.model], cache_dir=args.cache,
                                       allow_patterns=["*.bin", "*.json", "merges.txt"]))
-    valid = Path(hf_hub_download(repo_id=DATASET[0], repo_type="dataset",
-                                 filename=DATASET[1], cache_dir=args.cache))
+    if args.valid_file:
+        # A non-English model must not count English text: the counts drive
+        # vocab pruning, and TinyStories would keep Latin tokens the Ukrainian
+        # model never emits while crowding out Cyrillic ones.
+        valid = Path(args.valid_file)
+        print(f"[+] vocab counts from {valid}")
+    else:
+        valid = Path(hf_hub_download(repo_id=DATASET[0], repo_type="dataset",
+                                     filename=DATASET[1], cache_dir=args.cache))
 
     out_dir = Path(args.out_dir)
     tmp = out_dir / "embed"
@@ -375,12 +399,15 @@ def main():
     convert_model(snap, model_bin, kept, args.max_pos)
     write_tokenizer_blob(tok_bin, pieces, merges, eos_new)
 
-    check_encoding(snap, pieces, merges, old2new, [
-        "Summary: a girl finds a lost cat and helps it find its way home.\nStory:",
-        "Words: garden, rain, brave\nSummary: Tom plays outside.\nStory:",
-        "Once upon a time there was a little dog named Spot.",
-        'He said, "Yes, please. Read, please."',
-    ])
+    # Prove the device's pair-table BPE reproduces HF's exactly, on text from
+    # the model's own corpus rather than hardcoded English.
+    samples = ["Summary: a girl finds a lost cat and helps it find its way home.\nStory:",
+               "Once upon a time there was a little dog named Spot.",
+               'He said, "Yes, please. Read, please."']
+    if args.corpus:
+        corpus_head = Path(args.corpus[0]).read_text(encoding="utf-8")[:20000]
+        samples = [s for s in corpus_head.split("\n\n") if s.strip()][:40] or samples
+    check_encoding(snap, pieces, merges, old2new, samples)
 
     if not args.no_cpp:
         print("[+] emitting C++ embed sources")

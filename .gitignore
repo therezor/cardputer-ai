@@ -10,3 +10,15 @@ sdkconfig.*
 *.swp
 *.swo
 .cache
+__pycache__/
+*.pyc
+
+# Ukrainian training data and checkpoints: ~12 GB of corpora, token caches and
+# intermediate runs. The corpus is rebuildable from tools/prepare_ukr_data.py,
+# and the model itself is published at huggingface.co/TheREZOR/TinyTalk-UA —
+# what the firmware needs is embed/*.bin, which is tracked.
+data/ukr/
+
+# Browser demo build products (emcc output, inlined page). `tools/web/build.sh`
+# then `tools/web/make_page.py` regenerate them.
+tools/web/dist/

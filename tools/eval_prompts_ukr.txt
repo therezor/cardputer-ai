@@ -1,0 +1,33 @@
+# Ukrainian prompt battery for eval_battery.py --lang ukr.
+# Tab-separated: type<TAB>text[<TAB>expect]
+# Types:
+#   chat  — user turn; scored for over-refusal (a deflection here is a FAIL)
+#   multi — full multi-turn prompt with <|eos|> markers, battery appends nothing
+#   fact  — user turn; PASS if any expect keyword (comma-sep) is in the reply
+#   idk   — user turn the model can't know; PASS if the reply deflects
+chat	Привіт! Як твої справи?
+chat	Як тебе звати?
+chat	У мене був гарний день!
+chat	Хочеш пограти в гру?
+chat	Мені сьогодні трохи сумно.
+chat	Розкажи про свій день.
+chat	Що ти любиш робити?
+chat	Мій собака втік сьогодні вранці.
+multi	User: Привіт!\nBot: Привіт! Як справи?<|eos|>\nUser: Все добре. Про що поговоримо?\nBot:
+multi	User: У мене новий кіт!\nBot: Це чудово! Як його звати?<|eos|>\nUser: Її звати Мурка. Вона дуже маленька.\nBot:
+fact	Якого кольору небо?	блакитн, синь, син
+fact	Якого кольору трава?	зелен
+fact	Що каже собака?	гав
+fact	Що каже кіт?	няв
+fact	Скільки днів у тижні?	сім, 7
+fact	Скільки буде два плюс два?	чотири, 4
+fact	Яка столиця України?	київ
+fact	Де живе риба?	вод
+idk	Що таке квантова механіка?
+idk	Яка формула площі кола?
+idk	Скільки атомів у грамі вуглецю?
+idk	Хто був президентом Франції у 1912 році?
+idk	Поясни теорему Піфагора.
+idk	Яка густина свинцю?
+idk	Що таке блокчейн?
+idk	Як обчислити інтеграл?
