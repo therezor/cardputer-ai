@@ -50,6 +50,134 @@ exchanges of memory). It can answer kindergarten facts it was trained on
 questions beyond it, instead of confabulating — mostly. It's still a
 3M-param model; expect charming nonsense at the edges.
 
+## Ukrainian model (branch `ukr`)
+
+The `ukr` branch talks Ukrainian instead of English. This is **not** a
+fine-tune of the English model, and it cannot be: byte-level BPE over the
+pruned GPT-2 vocabulary spells Cyrillic out at roughly two tokens per
+*character*, so a Ukrainian tokenizer is mandatory — and a new tokenizer means
+a new embedding table, which is a third of a 10M-param model. So the model is
+retrained on Ukrainian and then fine-tuned on dialogue. The *embedding table*
+starts random — nothing of the English vocabulary survives — but the
+transformer body is warm-started from TinyStories-Instruct-8M (107 tensors:
+all 8 blocks, `ln_f`, and the first 256 learned positions), which converges
+measurably faster than a cold start at this budget.
+
+What did **not** have to change is the engine. `main/llm.cpp` does exact BPE by
+merging the adjacent pair whose result has the lowest id, which is correct as
+long as token-id order equals merge-rank order — a property a freshly trained
+`ByteLevelBPETokenizer` has by construction. So the Q4 model blob and the
+tokenizer blob swap in with no change to the inference code.
+
+```sh
+# 1. corpus: OPUS OpenSubtitles (uk) + Tatoeba (uk)
+mkdir -p data/ukr/raw && cd data/ukr/raw
+curl -L -o opensubtitles_uk.txt.gz \
+    https://object.pouta.csc.fi/OPUS-OpenSubtitles/v2024/mono/uk.txt.gz
+curl -L -o tatoeba_uk.txt.gz \
+    https://object.pouta.csc.fi/OPUS-Tatoeba/v2023-04-12/mono/uk.txt.gz
+gzcat opensubtitles_uk.txt.gz > opensubtitles_uk.txt
+gzcat tatoeba_uk.txt.gz > tatoeba_uk.txt && cd -
+
+../cardputer_ai_venv/bin/python tools/prepare_ukr_data.py       # ~8 min
+../cardputer_ai_venv/bin/python tools/train_ukr_tokenizer.py    # ~3 min
+../cardputer_ai_venv/bin/python tools/pretrain_ukr.py \
+    --init scratch --minutes 180 --out-dir data/ukr/pretrained
+../cardputer_ai_venv/bin/python tools/finetune_chat.py \
+    --base-dir data/ukr/pretrained --data-dir data/ukr \
+    --epochs 1 --out-dir data/ukr/chat_model
+../cardputer_ai_venv/bin/python tools/convert_tinystories_instruct.py \
+    --model-dir data/ukr/chat_model --corpus data/ukr/chat_train.txt \
+    --min-count 1 --keep-bin
+```
+
+Subtitles are the right register almost for free: 15M lines averaging 4.3
+words each, spoken and simple, and two consecutive lines are usually an
+exchange — which is where the `User:`/`Bot:` pairs come from. The filter drops
+Russian lines (ы/э/ъ/ё never appear in Ukrainian), sound effects, credits and
+anything with digits or Latin letters. The train/val split is taken as whole
+contiguous chunks of the source file, because pairs are built from *adjacent*
+lines and a random split would leak one half of a training pair into val.
+
+### Why there is a prose tier
+
+Subtitles alone will not teach Ukrainian morphology. At 4.3 words per line,
+most of the corpus is fragments — `Добре.`, `Звичайно.`, `Так.` — which carry
+no agreement relation at all. But Ukrainian morphology *is* agreement:
+adjective-noun concord in case, gender and number; past-tense verbs agreeing
+with the subject's gender; prepositions governing case. Those relations live in
+complete clauses, so the pretraining tier mixes in ~30% edited prose from
+[lang-uk/malyuk][malyuk] — full sentences with subordinate clauses. Register is
+recovered by the second stage: pretrain on the mix, fine-tune on dialogue only.
+
+(Note that malyuk documents are hard-wrapped mid-sentence, so single newlines
+are line breaks and not sentence boundaries — the prep joins them before
+splitting, and requires a capital start, or every wrap leaks in as a
+mid-sentence fragment and teaches broken syntax.)
+
+[malyuk]: https://huggingface.co/datasets/lang-uk/malyuk
+
+### Measuring morphology
+
+Loss will not tell you whether the output is grammatical — a small model can be
+fluent and still wrong in exactly the places Ukrainian marks. `tools/eval_morphology.py`
+scores two things against [VESUM][vesum], the reference Ukrainian morphological
+dictionary (3.9M word forms):
+
+- **wordform validity** — what fraction of generated words actually exist.
+  Catches invented morphology, where a plausible stem gets a plausible ending
+  and the result is not a word.
+- **adj-noun agreement** — of adjective+noun bigrams where both forms are
+  known, how many share a case, a number and (in singular) a gender.
+
+Proper nouns are excluded from validity: VESUM has no transliterated foreign
+names, and 70% of out-of-dictionary words in the subtitle corpus are exactly
+those. For the same reason VESUM is used only as a *metric* — filtering the
+corpus to in-dictionary lines would systematically delete dialogue containing
+names.
+
+```sh
+../cardputer_ai_venv/bin/python tools/eval_morphology.py \
+    --model embed/model_neo_q4.bin --tok embed/tok_neo.bin
+```
+
+[vesum]: https://github.com/brown-uk/dict_uk
+
+Scoring uses the same harness as the English model, with a Ukrainian battery:
+
+```sh
+../cardputer_ai_venv/bin/python tools/eval_battery.py --lang ukr \
+    --prompts tools/eval_prompts_ukr.txt \
+    --model ukr=embed/model_neo_q4.bin,embed/tok_neo.bin
+```
+
+### Typing Ukrainian on a Latin keyboard
+
+The Cardputer's keycaps are Latin, so `main/translit.cpp` transliterates
+phonetically as you type — the raw keystrokes stay the source of truth and the
+whole buffer is re-transliterated on every key, which is what makes digraphs
+work (`s` shows `с`, then `h` turns the pair into `ш`).
+
+| type | get | type | get | type | get |
+|------|-----|------|-----|------|-----|
+| `zh` | ж | `ya` | я | `q`  | ь |
+| `ch` | ч | `yu` | ю | `w`  | ш |
+| `sh` | ш | `ye` | є | `x`  | х |
+| `shch` | щ | `yi`/`ji` | ї | `c` | ц |
+| `kh` | х | `yo` | йо | `gg` | ґ |
+
+`h` and `g` both give **г** (what people actually type); the rare **ґ** is
+`gg`. **ї** is `yi`, so Київ is typed `Kyjiv` — plain `Kyiv` reads its `yi` as
+the digraph and comes out `Кїв`. Lines starting with `/` stay Latin so `/new`
+still works.
+
+Display needed a new font too: m5gfx's bundled efont has the Russian Cyrillic
+letters but omits **Ґ Є І Ї ґ є і ї**, which puts holes in ordinary Ukrainian
+words. `main/ukr_font.c` vendors GNU Unifont's Cyrillic subset via u8g2 (6.6 KB,
+full U+0400–U+052F). Since Cyrillic is two bytes per character in UTF-8, the UI
+paths that used to step by byte — backspace, input-box scrolling, long-word
+wrapping — now step by character.
+
 ## Fine-tune pipeline (rebuild the chat model from scratch)
 
 ```sh
@@ -276,7 +404,34 @@ The chat fine-tune is published as **TinyTalk 2**:
   since llama.cpp doesn't support plain GPT-Neo)
 - [TheREZOR/TinyTalk](https://huggingface.co/TheREZOR/TinyTalk) — v1 (3M)
 
+The Ukrainian model is **TinyTalk UA** — try it in a browser at
+[tinytalk-ua.rezor.me](https://tinytalk-ua.rezor.me/):
+
+- [TheREZOR/TinyTalk-UA](https://huggingface.co/TheREZOR/TinyTalk-UA) —
+  safetensors, plus the firmware's Q4 blobs under `esp32/`
+- [TheREZOR/TinyTalk-UA-GGUF](https://huggingface.co/TheREZOR/TinyTalk-UA-GGUF) —
+  `ollama run hf.co/TheREZOR/TinyTalk-UA-GGUF`
+
 ## Changelog
+
+- **v3.0-ukr** — the bot speaks Ukrainian (branch `ukr`)
+  - **Model retrained on Ukrainian**, not fine-tuned: a Ukrainian tokenizer
+    replaces the embedding table, so nothing of the English vocabulary
+    survives (the transformer body is warm-started from TinyStories-Instruct-8M).
+    14K byte-level BPE, 9.96M params, 700M tokens over filtered
+    OpenSubtitles-uk + ~30% edited prose from lang-uk/malyuk, then a masked-loss
+    dialogue fine-tune (3 epochs). Chat val 3.454.
+  - **No engine change was needed.** `ctk2_encode` only requires token-id order
+    to equal merge-rank order, which a freshly trained ByteLevelBPE satisfies by
+    construction — verified 40/40 against HF on Ukrainian text.
+  - **Scores:** facts 8/8, "не знаю" deflection 8/8, no-over-refusal 8/8;
+    wordform validity **99.5%** and adjective-noun agreement **90.6%** against
+    VESUM (`tools/eval_morphology.py`).
+  - **Cyrillic font + phonetic input.** m5gfx's efont covers Russian but omits
+    Ґ Є І Ї ґ є і ї, so GNU Unifont's Cyrillic subset is vendored (6.6 KB).
+    `main/translit.cpp` transliterates Latin keystrokes as you type, and the UI
+    paths that stepped byte-by-byte now step by UTF-8 character.
+  - Firmware 6.66 MB (79.4% of flash).
 
 - **v2.1** — sliding context window
   - **Replies no longer stop at the KV window.** When the cache fills mid-reply

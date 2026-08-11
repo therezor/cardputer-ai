@@ -43,6 +43,38 @@ fine-tuned on them should not be distributed commercially.
   (Modified MIT License, Copyright (c) 2019 OpenAI). Embedded here in
   pruned, re-encoded form inside `tok_data.cpp`.
 
+## Ukrainian model (branch `ukr`)
+
+The Ukrainian build replaces the base model entirely — a Ukrainian tokenizer
+means a new embedding table, so nothing of TinyStories-Instruct is reused.
+
+- **OPUS OpenSubtitles v2024**, Ukrainian monolingual
+  (https://opus.nlpl.eu/OpenSubtitles/), derived from OpenSubtitles.org.
+  Lison & Tiedemann, *OpenSubtitles2016: Extracting Large Parallel Corpora
+  from Movie and TV Subtitles* (LREC 2016). Used, filtered, as both the
+  pretraining text and the source of dialogue pairs. OPUS distributes these
+  corpora for research use; check the source terms before commercial use.
+- **OPUS Tatoeba** (https://opus.nlpl.eu/Tatoeba/), from Tatoeba.org,
+  **CC BY 2.0 FR**. Ukrainian sentences mixed into the pretraining tier.
+- **lang-uk/malyuk** (https://huggingface.co/datasets/lang-uk/malyuk),
+  **no license tag**. A community compilation of UberText 2.0, OSCAR
+  (unshuffled_deduplicated_uk) and Ukrainian news; its author states it is not
+  an official release. ~30% of the pretraining tier — the complete-clause
+  prose that carries Ukrainian agreement, which subtitles do not. Consult the
+  constituent corpora before any commercial use.
+- `tools/ukr_qa_facts.py` — hand-written for this repository, MIT with the
+  rest of the source.
+
+## Vendored font (`main/ukr_font.c`)
+
+- **GNU Unifont** Cyrillic subset, via u8g2
+  (https://github.com/olikraus/u8g2), font
+  `u8g2_font_unifont_t_cyrillic`. **SIL Open Font License 1.1**,
+  Copyright (C) 1998-2024 Roman Czyborra, Paul Hardy, Qianqian Fang,
+  Andrew Miller, Johnnie Weaver, David Corbett, Nils Moskopp,
+  Rebecca Bettencourt, Ho-Seok Ee, et al. Needed because m5gfx's bundled
+  efont covers Russian Cyrillic but omits Ukrainian Ґ Є І Ї ґ є і ї.
+
 ## Alternative model (not embedded by default)
 
 - **Maykeye/TinyLLama-v0** (https://huggingface.co/Maykeye/TinyLLama-v0),
